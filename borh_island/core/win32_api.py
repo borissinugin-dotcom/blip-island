@@ -1384,3 +1384,47 @@ class GlobalHotkeyManager(QObject, QAbstractNativeEventFilter):
                     self.triggered.emit(action)
                     return True, 0
         return False, 0
+
+
+class _PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+    _fields_ = [
+        ("Version", ctypes.c_ulong),
+        ("ControlMask", ctypes.c_ulong),
+        ("StateMask", ctypes.c_ulong),
+    ]
+
+
+_timer_period_active = False
+
+
+def apply_laptop_performance_mode(remove_limits: bool = True) -> bool:
+    """Disable Windows EcoQoS/PowerThrottling, boost process priority, and enable 1ms timer resolution."""
+    global _timer_period_active
+    ok = False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        h_proc = kernel32.GetCurrentProcess()
+        # ProcessPowerThrottling = 4; ExecutionSpeed = 0x1, IgnoreTimerResolution = 0x4
+        state = _PROCESS_POWER_THROTTLING_STATE(
+            Version=1,
+            ControlMask=0x1 | 0x4,
+            StateMask=0 if remove_limits else (0x1 | 0x4),
+        )
+        if kernel32.SetProcessInformation(h_proc, 4, ctypes.byref(state), ctypes.sizeof(state)):
+            ok = True
+        prio = 0x00008000 if remove_limits else 0x00000020  # ABOVE_NORMAL_PRIORITY_CLASS vs NORMAL
+        if kernel32.SetPriorityClass(h_proc, prio):
+            ok = True
+    except Exception:
+        pass
+    try:
+        winmm = ctypes.windll.winmm
+        if remove_limits and not _timer_period_active:
+            if winmm.timeBeginPeriod(1) == 0:
+                _timer_period_active = True
+        elif (not remove_limits) and _timer_period_active:
+            winmm.timeEndPeriod(1)
+            _timer_period_active = False
+    except Exception:
+        pass
+    return ok

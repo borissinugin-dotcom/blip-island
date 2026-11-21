@@ -56,6 +56,16 @@ _DEV_CODE_HASHES: dict[str, dict[str, object]] = {
         "all_unlocked": True,
         "label": "Full Developer Edition",
     },
+    "7c7f15fbd83b699d3e936fecd53d814f45878650fdff5ce1dd457d4470dcf3d5": {
+        "chars": ("borscht", "purple_star", "kamaz", "meimei"),
+        "all_unlocked": True,
+        "label": "Full Developer Edition",
+    },
+    "ccebcd27c45983769cc7fdf3502128e8373a014fb8622feda9f97f8291617a14": {
+        "chars": ("borscht", "purple_star", "kamaz", "meimei"),
+        "all_unlocked": True,
+        "label": "Full Developer Edition",
+    },
 }
 
 _REG_PATH = r"Software\Blip"

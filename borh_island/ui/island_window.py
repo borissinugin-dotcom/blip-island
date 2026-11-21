@@ -1356,8 +1356,10 @@ class IslandWindow(QWidget):
 
     def apply_config(self) -> None:
         from ..core.licensing import get_license_manager
+        from ..core.win32_api import apply_laptop_performance_mode
 
         cfg = self.config_mgr.config
+        apply_laptop_performance_mode(bool(getattr(cfg, "remove_power_limits", True)))
         self._sync_palettes(force_panel=True)
         eff_char = cfg.character_id if get_license_manager().is_character_allowed(cfg.character_id) else "liquid"
         self.character.set_character(eff_char)
@@ -2095,8 +2097,9 @@ class IslandWindow(QWidget):
         self.eq_mini.set_bands(bands, self._playing)
         if self._playing or self._music_vis_env > 0.008:
             self._music_phase += 0.22 + 0.36 * self._music_energy
-            if self._watch_timer.interval() > _ACTIVE_FRAME_MS:
-                self._watch_timer.setInterval(_ACTIVE_FRAME_MS)
+            active_ms, _, _ = self._fps_timing()
+            if self._watch_timer.interval() > active_ms:
+                self._watch_timer.setInterval(active_ms)
             self.update()
 
     def update_timer_badge(self, remaining_sec: int, running: bool, label: str = "") -> None:
@@ -2303,13 +2306,23 @@ class IslandWindow(QWidget):
                 return
         self.apply_config()
 
+    def _fps_timing(self) -> tuple[int, int, float]:
+        """Return (active_ms, idle_ms, min_paint_dt) from configured target_fps (30|60|120|240)."""
+        raw = int(getattr(self.config_mgr.config, "target_fps", 120) or 120)
+        fps = min((30, 60, 120, 240), key=lambda v: abs(v - raw))
+        active_ms = max(4, int(round(1000.0 / float(fps))))
+        idle_ms = max(active_ms, 16 if fps >= 60 else 33)
+        min_paint_dt = max(0.0038, (1.0 / float(fps)) * 0.90)
+        return active_ms, idle_ms, min_paint_dt
+
     # ------------------------------------------------------------------ Liquid Droplet Physics
     def trigger_drop_impulse(self, strength: float = 0.8) -> None:
         """Apply a momentary surface-tension liquid ripple."""
         self._drop_wobble = max(-1.8, min(1.8, self._drop_wobble + strength))
         self._drop_vel += strength * 0.50
-        if self._watch_timer.interval() > _ACTIVE_FRAME_MS:
-            self._watch_timer.setInterval(_ACTIVE_FRAME_MS)
+        active_ms, _, _ = self._fps_timing()
+        if self._watch_timer.interval() > active_ms:
+            self._watch_timer.setInterval(active_ms)
 
     def _update_liquid_physics(self, global_cursor: QPointF, *, _from_timer: bool = False) -> None:
         suspended_full = (
@@ -2391,34 +2404,35 @@ class IslandWindow(QWidget):
                     self._atmo_phase += dt_a * 1.12
                     eff_wind = self._wind_ms
                     self._cloud_phase += dt_a * 1.12 * (0.08 + min(35.0, max(0.0, eff_wind)) * 0.52)
+                active_ms, idle_ms, min_paint_dt = self._fps_timing()
                 scroll_active = bool(getattr(self.panel, "_smooth_scroll_active", False))
                 if self._playing or self._atmo_anim.is_transitioning() or scroll_active:
-                    desired = _ACTIVE_FRAME_MS
+                    desired = active_ms
                 elif rain_anim:
-                    desired = _ACTIVE_FRAME_MS
+                    desired = active_ms
                 elif atmo_rain_anim:
-                    desired = 16
+                    desired = idle_ms
                 elif self._expanded:
-                    desired = _EXPANDED_IDLE_MS
+                    desired = idle_ms
                 else:
                     desired = 95
-                want_timer_type = Qt.TimerType.PreciseTimer if desired <= 16 else Qt.TimerType.CoarseTimer
+                want_timer_type = Qt.TimerType.PreciseTimer if desired < 16 else Qt.TimerType.CoarseTimer
                 if self._watch_timer.timerType() != want_timer_type:
                     self._watch_timer.setTimerType(want_timer_type)
                 if self._watch_timer.interval() != desired:
                     self._watch_timer.setInterval(desired)
                 use_atmo = self._use_weather_appearance()
                 if self._playing or self._atmo_anim.is_transitioning() or scroll_active or rain_anim:
-                    if (now_a - self._last_ui_paint_ts) >= 0.0075:
+                    if (now_a - self._last_ui_paint_ts) >= min_paint_dt:
                         self._last_ui_paint_ts = now_a
                         self.update()
-                elif atmo_rain_anim and (now_a - self._last_ui_paint_ts) >= 0.016:
+                elif atmo_rain_anim and (now_a - self._last_ui_paint_ts) >= max(min_paint_dt, 0.016):
                     self._last_ui_paint_ts = now_a
                     self.update()
                 elif not self._expanded and (now_a - self._last_ui_paint_ts) >= 0.45:
                     self._last_ui_paint_ts = now_a
                     self.update()
-                elif self._expanded and use_atmo and (now_a - self._last_ui_paint_ts) >= 0.022:
+                elif self._expanded and use_atmo and (now_a - self._last_ui_paint_ts) >= max(min_paint_dt, 0.022):
                     self._last_ui_paint_ts = now_a
                     self.update()
             elif not self.isVisible():
@@ -2736,23 +2750,24 @@ class IslandWindow(QWidget):
         rain_anim, atmo_rain_anim = self._step_card_rain(now_a)
         scroll_active = bool(getattr(self.panel, "_smooth_scroll_active", False))
         edge_proximity = (dist < 135.0) if not self._expanded else (0.5 < dist < 135.0)
+        active_ms, idle_ms, min_paint_dt = self._fps_timing()
         if not self.isVisible():
             desired_ms = 240
         elif self._hide_state in ("hiding", "showing") or self._anim.state() == QPropertyAnimation.State.Running:
-            desired_ms = _ACTIVE_FRAME_MS
+            desired_ms = active_ms
         elif active_physics or scroll_active or (not self._expanded and edge_proximity):
-            desired_ms = _ACTIVE_FRAME_MS
+            desired_ms = active_ms
         elif self._playing or self._music_vis_env > 0.008:
-            desired_ms = _EXPANDED_MUSIC_MS if self._expanded else _ACTIVE_FRAME_MS
+            desired_ms = active_ms
         elif rain_anim:
-            desired_ms = _ACTIVE_FRAME_MS
+            desired_ms = active_ms
         elif atmo_rain_anim:
-            desired_ms = 16
+            desired_ms = idle_ms
         elif self._expanded:
-            desired_ms = _EXPANDED_IDLE_MS
+            desired_ms = idle_ms
         else:
             desired_ms = 95
-        want_timer_type = Qt.TimerType.PreciseTimer if desired_ms <= 24 else Qt.TimerType.CoarseTimer
+        want_timer_type = Qt.TimerType.PreciseTimer if desired_ms < 16 else Qt.TimerType.CoarseTimer
         if self._watch_timer.timerType() != want_timer_type:
             self._watch_timer.setTimerType(want_timer_type)
         if self._watch_timer.interval() != desired_ms:
@@ -2767,14 +2782,13 @@ class IslandWindow(QWidget):
             and (getattr(self, "_custom_bg_cv_cap", None) is not None or getattr(self, "_custom_bg_movie", None) is not None)
         )
         if active_physics or scroll_active or self._playing or rain_anim or self._anim.state() == QPropertyAnimation.State.Running:
-            min_paint_dt = 0.0075
             if (now_a - self._last_ui_paint_ts) >= min_paint_dt:
                 self._last_ui_paint_ts = now_a
                 self.update()
-        elif atmo_rain_anim and not has_video_bg and (now_a - self._last_ui_paint_ts) >= 0.016:
+        elif atmo_rain_anim and not has_video_bg and (now_a - self._last_ui_paint_ts) >= max(min_paint_dt, 0.016):
             self._last_ui_paint_ts = now_a
             self.update()
-        elif self._expanded and not has_video_bg and self._use_weather_appearance() and (now_a - self._last_ui_paint_ts) >= 0.022:
+        elif self._expanded and not has_video_bg and self._use_weather_appearance() and (now_a - self._last_ui_paint_ts) >= max(min_paint_dt, 0.022):
             self._last_ui_paint_ts = now_a
             self.update()
 
@@ -2970,8 +2984,9 @@ class IslandWindow(QWidget):
                     self.pill_bar.setVisible(True)
                     self._drop_dir_x, self._drop_dir_y = 0.0, 1.0
                     self.trigger_drop_impulse(0.20)
-            if self._watch_timer.interval() != _ACTIVE_FRAME_MS:
-                self._watch_timer.setInterval(_ACTIVE_FRAME_MS)
+            active_ms, _, _ = self._fps_timing()
+            if self._watch_timer.interval() != active_ms:
+                self._watch_timer.setInterval(active_ms)
             self.update()
         elif self._hide_state == "hidden":
             want_ms = 75 if (cfg.auto_hide or cfg.hide_in_fullscreen) else 240
@@ -4039,7 +4054,7 @@ class IslandWindow(QWidget):
                     painter.fillRect(canvas_rect, sg)
 
             if use_glass:
-                dpr = max(1.0, float(self.devicePixelRatioF()))
+                dpr = min(1.35, max(1.0, float(self.devicePixelRatioF())))
                 pw = max(1, int(round(self.width() * dpr)))
                 ph = max(1, int(round(self.height() * dpr)))
 
@@ -4117,16 +4132,17 @@ class IslandWindow(QWidget):
                 comp_cache = getattr(self, "_exp_composite_cache", None)
                 scroll_running = bool(getattr(self.panel, "_smooth_scroll_active", False))
                 fast_glass = (self._anim.state() == QPropertyAnimation.State.Running) or scroll_running
+                _, _, min_paint_dt = self._fps_timing()
                 if is_sliding or fast_glass:
-                    max_age = 0.0075
+                    max_age = min_paint_dt
                 elif live_scene_motion or use_weather_atmo:
-                    max_age = 0.032
+                    max_age = max(min_paint_dt, 0.016)
                 else:
                     max_age = 0.50
                 if scroll_running:
                     surf_age = 0.075
                 elif live_scene_motion or use_weather_atmo:
-                    surf_age = 0.032
+                    surf_age = max(min_paint_dt, 0.016)
                 else:
                     surf_age = 0.50
                 is_video_stream = bool(

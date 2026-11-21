@@ -1608,6 +1608,12 @@ def main() -> int:
         return 0
 
     ctrl = BorhIslandController(initial_expand=(args.expand and not args.autostart), initial_tab=args.tab)
+    try:
+        from borh_island.core.win32_api import apply_laptop_performance_mode
+
+        apply_laptop_performance_mode(bool(getattr(ctrl.config_mgr.config, "remove_power_limits", True)))
+    except Exception:
+        pass
     app.installNativeEventFilter(ctrl.hotkeys)
     app.aboutToQuit.connect(ctrl.cleanup)
     return app.exec()

@@ -63,6 +63,8 @@ class LicensingTests(unittest.TestCase):
             ("BORhBaRsMEYY673514", {"borscht", "purple_star", "kamaz", "meimei"}, True),
             ("BLIP-FULL-C23EA8D2", {"borscht", "purple_star", "kamaz", "meimei"}, True),
             ("BLIP-FULL-F0739A26", {"borscht", "purple_star", "kamaz", "meimei"}, True),
+            ("BLIP-FULL-777A3C47", {"borscht", "purple_star", "kamaz", "meimei"}, True),
+            ("BLIP-FULL-C5DBA0B1", {"borscht", "purple_star", "kamaz", "meimei"}, True),
         ]
         for code, expected_dev, expected_all in cases:
             with self.subTest(code=code):

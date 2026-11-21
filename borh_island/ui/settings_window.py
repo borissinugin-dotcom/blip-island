@@ -522,11 +522,28 @@ class SettingsWindow(QDialog):
         q_wrap = QWidget()
         q_wrap.setLayout(q_row)
 
+        self.fps_combo = QComboBox()
+        for fps_val in (240, 120, 60, 30):
+            self.fps_combo.addItem(f"{fps_val} FPS", fps_val)
+        cur_fps = min((30, 60, 120, 240), key=lambda v: abs(v - int(getattr(cfg, "target_fps", 120) or 120)))
+        self.fps_combo.setCurrentIndex(max(0, self.fps_combo.findData(cur_fps)))
+        self.fps_combo.activated.connect(self._apply_atmosphere_live)
+
+        self.chk_remove_power_limits = QCheckBox(
+            "Убрать лимиты Windows (режим ноутбука / без троттлинга)"
+            if cfg.language == "ru"
+            else "Remove Windows limits (laptop mode / no throttling)"
+        )
+        self.chk_remove_power_limits.setChecked(bool(getattr(cfg, "remove_power_limits", True)))
+        self.chk_remove_power_limits.toggled.connect(self._apply_atmosphere_live)
+
         form.addRow("Пресет сцены:", self.atmo_combo)
         form.addRow("Небо / время суток:", self.sky_combo)
         form.addRow("Погодный слой:", self.weather_combo)
         form.addRow("Фаза луны:", self.moon_combo)
         form.addRow("Детализация графики:" if cfg.language == "ru" else "Graphics detail:", q_wrap)
+        form.addRow("Лимит кадров (FPS):" if cfg.language == "ru" else "FPS Limit:", self.fps_combo)
+        form.addRow("", self.chk_remove_power_limits)
         ac_lay.addLayout(form)
 
         reset_btn = QPushButton("Сбросить на Авто (по времени и городу)" if cfg.language == "ru" else "Reset to Auto (time & city)")
@@ -622,6 +639,8 @@ class SettingsWindow(QDialog):
         cfg.atmosphere_weather_mode = str(self.weather_combo.currentData() or "auto")
         cfg.atmosphere_moon_mode = str(self.moon_combo.currentData() or "auto")
         cfg.atmosphere_quality = int(self.quality_slider.value())
+        cfg.target_fps = int(self.fps_combo.currentData() or 120)
+        cfg.remove_power_limits = bool(self.chk_remove_power_limits.isChecked())
         self.config_mgr.save()
         self.config_applied.emit()
 
@@ -958,6 +977,8 @@ class SettingsWindow(QDialog):
         cfg.atmosphere_weather_mode = str(self.weather_combo.currentData() or "auto")
         cfg.atmosphere_moon_mode = str(self.moon_combo.currentData() or "auto")
         cfg.atmosphere_quality = int(self.quality_slider.value())
+        cfg.target_fps = int(self.fps_combo.currentData() or 120)
+        cfg.remove_power_limits = bool(self.chk_remove_power_limits.isChecked())
         cfg.show_dev_text_tools = self.chk_dev_tools.isChecked()
 
         cfg.discord_rpc_enabled = self.chk_discord_rpc.isChecked()

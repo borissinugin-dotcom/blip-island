@@ -834,7 +834,14 @@ class _InstalledAppsDialog(QDialog):
         self.chosen_action: str = ""
 
         self.setWindowTitle("Добавить приложение в лаунчер")
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
         self.resize(460, 520)
+        QTimer.singleShot(25, self._bring_to_front)
         self.setStyleSheet(
             "QDialog { background: rgba(18, 22, 32, 245); color: #F2F5FA; }"
             "QLabel { color: #F2F5FA; background: transparent; }"
@@ -1063,6 +1070,16 @@ class _InstalledAppsDialog(QDialog):
             self.chosen_action = "app"
             self.accept()
 
+    def _bring_to_front(self) -> None:
+        try:
+            from ...core.win32_api import set_always_on_top
+
+            set_always_on_top(int(self.winId()), True)
+        except Exception:
+            pass
+        self.raise_()
+        self.activateWindow()
+
     def _finish_action(self, action: str) -> None:
         self.chosen_action = action
         self.accept()
@@ -1072,7 +1089,14 @@ class _AddShortcutDialog(QDialog):
     def __init__(self, parent: QWidget | None = None, *, url_mode: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle("Добавить сайт" if url_mode else tr("add_shortcut"))
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
         self.setMinimumWidth(340)
+        QTimer.singleShot(25, lambda: (self.raise_(), self.activateWindow()))
         form = QFormLayout(self)
 
         self.name_edit = QLineEdit()
@@ -1103,11 +1127,10 @@ class _AddShortcutDialog(QDialog):
         form.addRow(btns)
 
     def _browse(self) -> None:
-        start_dir = os.environ.get("ProgramFiles") or str(Path.home() / "Desktop")
-        path, _ = QFileDialog.getOpenFileName(
-            self,
+        from ..color_wheel_dialog import open_file_dialog
+
+        path = open_file_dialog(
             "Выберите программу в Проводнике",
-            start_dir,
             "Программы и ярлыки (*.exe *.lnk *.bat *.cmd *.url);;Все файлы (*.*)",
         )
         if path:
@@ -2981,13 +3004,11 @@ class HomeTab(QWidget):
             )
             self.refresh_launcher()
         elif dlg.chosen_action == "file":
-            start_dir = os.environ.get("ProgramFiles") or str(Path.home() / "Desktop")
-            path, _ = QFileDialog.getOpenFileName(
-                self,
+            from ..color_wheel_dialog import open_file_dialog
+
+            path = open_file_dialog(
                 "Выберите программу",
-                start_dir,
                 "Программы и ярлыки (*.exe *.lnk *.bat *.cmd *.url);;Все файлы (*.*)",
-                options=QFileDialog.Option.DontResolveSymlinks,
             )
             if path:
                 title = Path(path).stem

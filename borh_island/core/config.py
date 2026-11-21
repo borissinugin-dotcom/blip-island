@@ -206,6 +206,8 @@ class AppConfig:
     notification_glass_mode: str = "auto"  # auto | off | liquid | frost
     refraction_quality: str = "ultra"  # low | medium | high | ultra
     refraction_bench_ms: float = 0.0
+    target_fps: int = 120  # 240 | 120 | 60 | 30
+    remove_power_limits: bool = True  # Disable Windows EcoQoS/PowerThrottling & boost UI priority for laptops
     edge_equalizer: bool = True
     show_lyrics_in_pill: bool = True
     show_weather_in_pill: bool = True
