@@ -92,7 +92,7 @@ from .theme import ThemePalette, resolve_palette, resolve_time_accent
 
 # Generous transparent perimeter margin reserved for liquid droplet, side curving & music waves
 _DROP_PAD_X = 165
-_DROP_PAD_TOP = 14
+_DROP_PAD_TOP = 20
 _DROP_PAD_BOTTOM = 165
 
 _VIDEO_PLAYER_EXES = frozenset({
@@ -1662,13 +1662,16 @@ class IslandWindow(QWidget):
                 if not self._has_media:
                     base_w = 435
                 elif lyrics_on:
-                    base_w = 720
+                    lyric_px = self.pill_lyric_lbl.fontMetrics().horizontalAdvance(f"♪  {self._media_lyric}") + 36
+                    base_w = max(720, 490 + lyric_px)
                 else:
                     base_w = 648
             elif self._has_media:
                 lyrics_on = bool(cfg.show_lyrics_in_pill and (self._playing or bool(self._media_lyric)) and self._media_lyric)
                 if lyrics_on:
-                    base_w = 560 if (cfg.pill_mode == "miniplayer" or self._hover_active) else 505
+                    lyric_px = self.pill_lyric_lbl.fontMetrics().horizontalAdvance(f"♪  {self._media_lyric}") + 36
+                    min_w = 560 if (cfg.pill_mode == "miniplayer" or self._hover_active) else 505
+                    base_w = max(min_w, 260 + lyric_px)
                 elif cfg.pill_mode == "miniplayer" or self._hover_active:
                     base_w = 495
                 elif cfg.pill_mode == "compact":
@@ -1820,10 +1823,8 @@ class IslandWindow(QWidget):
             elif lyrics_on:
                 self.pill_text.setMaximumWidth(108 if in_game_now else 145)
                 self.pill_text.setText(self._media_song_only or self._media_title_full)
-                elided_p = self.pill_lyric_lbl.fontMetrics().elidedText(
-                    f"♪  {self._media_lyric}", Qt.TextElideMode.ElideRight, 165 if in_game_now else 240
-                )
-                self.pill_lyric_lbl.setText(elided_p)
+                self.pill_lyric_lbl.setMaximumWidth(16777215)
+                self.pill_lyric_lbl.setText(f"♪  {self._media_lyric}")
                 _apply_lyric_chip_style(self.pill_lyric_lbl, self.palette.accent, in_strip=False)
                 self.pill_lyric_lbl.show()
             else:
@@ -2795,10 +2796,15 @@ class IslandWindow(QWidget):
     # ------------------------------------------------------------------ Interactions & Auto-hide
     def _on_watch_tick(self) -> None:
         pos = QCursor.pos()
-        cx = self.x() + self.width() * 0.5
-        cy = self.y() + self.height() * 0.5
+        if self.character.isVisible():
+            c_glob = self.character.mapToGlobal(self.character.rect().center())
+            cx = float(c_glob.x())
+            cy = float(c_glob.y())
+        else:
+            cx = self.x() + self.width() * 0.5
+            cy = self.y() + self.height() * 0.5
         if not (bool(getattr(self, "_fg_screen_covered", False)) or self._hide_state == "hidden" or self.isMinimized()):
-            dx = max(-1.0, min(1.0, (pos.x() - cx) / 350.0))
+            dx = max(-1.0, min(1.0, (pos.x() - cx) / 320.0))
             dy = max(-1.0, min(1.0, (pos.y() - cy) / 220.0))
             prev_c = getattr(self, "_last_char_norm", (-9.0, -9.0))
             if abs(dx - prev_c[0]) > 0.015 or abs(dy - prev_c[1]) > 0.015:
@@ -3967,23 +3973,14 @@ class IslandWindow(QWidget):
         radius = 21.5 if (not self._expanded and not self._music_strip_open) else 18.0
         path = self._build_liquid_path(core, radius)
 
-        # Collapsed droplet immerses in music/Spotify cover color (kept on pause while Spotify is open)
-        if not self._expanded and (collapsed_tint or self._activity_active):
-            glow = QColor(eff_hex)
-            glow.setAlpha(38 + int(28 * self._music_energy))
-            p.setPen(QPen(glow, 5.0))
-            p.setBrush(Qt.BrushStyle.NoBrush)
+        # Collapsed pill is ALWAYS pure solid black (no Liquid Glass, no Frost Glass)
+        if not self._expanded:
+            p.setPen(QPen(border if (collapsed_tint or self._activity_active or self._drop_amp > 0.22 or self._alarm_active) else QColor(255, 255, 255, 34), 1.4))
+            p.setBrush(QColor(0, 0, 0, 255))
             p.drawPath(path)
-
-            fill_grad = QLinearGradient(core.topLeft(), core.bottomRight())
-            top_c = QColor(bg)
-            bot_c = QColor(eff_hex)
-            bot_c.setAlpha(min(242, max(185, bg.alpha())))
-            fill_grad.setColorAt(0.0, top_c)
-            fill_grad.setColorAt(1.0, bot_c)
-            p.setPen(QPen(border, 1.9))
-            p.setBrush(fill_grad)
-            p.drawPath(path)
+            if self.pill_bar.isVisible() and self.character.isVisible() and self.character.has_island_top_addon():
+                char_pos = self.character.mapTo(self, self.character.rect().center())
+                self.character.paint_island_top_addon(p, core, float(char_pos.x()))
         elif self._expanded:
             from ..core.licensing import get_license_manager
 
@@ -4234,11 +4231,12 @@ class IslandWindow(QWidget):
                         bg_sig = (surf_key, now_c)
 
                     if fast_glass:
-                        # During 120 FPS scroll / morph / liquid stretch, paint directly without double-copying comp_img
+                        # During morph / scroll, skip heavy numpy 3D refraction so weak PCs stay 60/120+ FPS
                         self._exp_composite_cache = None
                         self._exp_backdrop_img = bg_img
                         p.drawImage(0, 0, bg_img)
-                        self._paint_glass_overlay(p, path, core, bg_img, glass_mode, bg_sig=bg_sig)
+                        if self._anim.state() != QPropertyAnimation.State.Running:
+                            self._paint_glass_overlay(p, path, core, bg_img, glass_mode, bg_sig=bg_sig)
                     else:
                         comp_img = getattr(self, "_exp_composite_img", None)
                         if (

@@ -91,6 +91,37 @@ CHARACTER_DEFS: list[tuple[str, str, str]] = [
     ("crystal_fox", "Ледяной лис", "Frost Fox"),
 ]
 
+# 25 Atoll-style minimal & peeking-out Built-in characters for pure solid-black collapsed island
+BUILTIN_CHARACTER_DEFS: list[tuple[str, str, str]] = [
+    ("builtin_eyes", "Два глаза", "Twin Eyes"),
+    ("builtin_clown_hat", "Клоунский колпак", "Clown Hat"),
+    ("builtin_cat_ears", "Ушки кота", "Cat Ears"),
+    ("builtin_devil_horns", "Рожки чёртика", "Devil Horns"),
+    ("builtin_crown", "Корона", "Royal Crown"),
+    ("builtin_angel_halo", "Нимб", "Angel Halo"),
+    ("builtin_bunny_ears", "Ушки зайца", "Bunny Ears"),
+    ("builtin_antenna", "Антенна", "Bot Antenna"),
+    ("builtin_wizard_hat", "Шляпа мага", "Wizard Hat"),
+    ("builtin_santa_hat", "Новогодний колпак", "Santa Hat"),
+    ("builtin_chef_hat", "Колпак шефа", "Chef Hat"),
+    ("builtin_sprout", "Росток", "Leaf Sprout"),
+    ("builtin_shark_fin", "Плавник акулы", "Shark Fin"),
+    ("builtin_dino_spikes", "Шипы дино", "Dino Spikes"),
+    ("builtin_headphones", "Наушники", "Headphones"),
+    ("builtin_ufo_dome", "Купол НЛО", "UFO Dome"),
+    ("builtin_bow", "Бантик", "Ribbon Bow"),
+    ("builtin_neon_eyes", "Неон-взгляд", "Neon Eyes"),
+    ("builtin_cyclops", "Циклоп", "Cyclops Eye"),
+    ("builtin_visor", "Кибер-визор", "Cyber Visor"),
+    ("builtin_cat_eyes", "Кошачьи глаза", "Cat Slits"),
+    ("builtin_sleepy_eyes", "Сонные глаза", "Sleepy Eyes"),
+    ("builtin_angry_eyes", "Сердитый взгляд", "Fierce Eyes"),
+    ("builtin_pixel_eyes", "Пиксель-глаза", "Pixel Eyes"),
+    ("builtin_ghost_peek", "Призрак-выглядыш", "Peeking Ghost"),
+]
+
+CHARACTER_DEFS.extend(BUILTIN_CHARACTER_DEFS)
+
 
 def _c(hex_or_color: str | QColor, alpha: int = 255) -> QColor:
     c = QColor(hex_or_color)
@@ -402,7 +433,7 @@ class CharacterWidget(QWidget):
                 "crystal_fox": self._draw_crystal_fox,
             }
             self._dispatch_cache = dispatch
-        fn = dispatch.get(cid, self._draw_slime)
+        fn = self._draw_builtin if cid.startswith("builtin_") else dispatch.get(cid, self._draw_slime)
         if self._alarm:
             sh = math.sin(self._phase * 9.0) * r * 0.08
             fn(p, cx + sh, cy, r)
@@ -2116,3 +2147,259 @@ class CharacterWidget(QWidget):
         sy = cy - r * 0.84
         p.drawLine(QPointF(sx - 2.6, sy), QPointF(sx + 2.6, sy))
         p.drawLine(QPointF(sx, sy - 2.6), QPointF(sx, sy + 2.6))
+
+    # ------------------------------------------------------------------ Built-in Atoll Black-Island Characters (25)
+    _BUILTIN_SPECS: dict[str, tuple[str, str, str]] = {
+        # cid: (eye_style, eye_color, top_addon)
+        "builtin_eyes": ("round", "#FFFFFF", "none"),
+        "builtin_clown_hat": ("round", "#FFFFFF", "clown_hat"),
+        "builtin_cat_ears": ("round", "#F8FAFC", "cat_ears"),
+        "builtin_devil_horns": ("angry", "#F87171", "devil_horns"),
+        "builtin_crown": ("round", "#FEF08A", "crown"),
+        "builtin_angel_halo": ("round", "#E0F2FE", "halo"),
+        "builtin_bunny_ears": ("round", "#FCE7F3", "bunny_ears"),
+        "builtin_antenna": ("neon", "#38BDF8", "antenna"),
+        "builtin_wizard_hat": ("round", "#DDD6FE", "wizard_hat"),
+        "builtin_santa_hat": ("round", "#FFFFFF", "santa_hat"),
+        "builtin_chef_hat": ("round", "#FFFFFF", "chef_hat"),
+        "builtin_sprout": ("round", "#ECFCCB", "sprout"),
+        "builtin_shark_fin": ("angry", "#7DD3FC", "shark_fin"),
+        "builtin_dino_spikes": ("round", "#A7F3D0", "dino_spikes"),
+        "builtin_headphones": ("neon", "#A855F7", "headphones"),
+        "builtin_ufo_dome": ("neon", "#4ADE80", "ufo_dome"),
+        "builtin_bow": ("round", "#FBCFE8", "bow"),
+        "builtin_neon_eyes": ("neon", "#22D3EE", "none"),
+        "builtin_cyclops": ("cyclops", "#38BDF8", "none"),
+        "builtin_visor": ("visor", "#22D3EE", "none"),
+        "builtin_cat_eyes": ("cat_slit", "#FACC15", "none"),
+        "builtin_sleepy_eyes": ("sleepy", "#CBD5E1", "none"),
+        "builtin_angry_eyes": ("angry", "#EF4444", "none"),
+        "builtin_pixel_eyes": ("pixel", "#4ADE80", "none"),
+        "builtin_ghost_peek": ("round", "#FFFFFF", "ghost_peek"),
+    }
+
+    def has_island_top_addon(self) -> bool:
+        spec = self._BUILTIN_SPECS.get(self._character_id)
+        return bool(spec and spec[2] != "none")
+
+    def paint_island_top_addon(self, p: QPainter, core: QRectF, char_center_x: float) -> None:
+        """Draw hats/ears/crowns/horns sticking out above the top edge of the collapsed black island."""
+        spec = self._BUILTIN_SPECS.get(self._character_id)
+        if not spec or spec[2] == "none":
+            return
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._draw_builtin_addon(p, char_center_x, core.top() + 1.0, 12.5, spec[2])
+        p.restore()
+
+    def _draw_builtin(self, p: QPainter, cx: float, cy: float, r: float) -> None:
+        spec = self._BUILTIN_SPECS.get(self._character_id, ("round", "#FFFFFF", "none"))
+        eye_style, col_hex, addon = spec
+        # In gallery thumbnails (not inside collapsed pill), draw dark backing & mini peeking addon
+        in_pill = self.width() <= 32 and self.height() <= 32
+        if not in_pill:
+            p.setPen(QPen(QColor(255, 255, 255, 40), 1.0))
+            p.setBrush(QColor(0, 0, 0, 255))
+            p.drawRoundedRect(QRectF(cx - r * 1.15, cy - r * 0.72, r * 2.3, r * 1.44), r * 0.68, r * 0.68)
+            if addon != "none":
+                self._draw_builtin_addon(p, cx, cy - r * 0.62, r * 0.78, addon)
+
+        lx = self._cursor_dx * r * 0.34
+        ly = self._cursor_dy * r * 0.28
+        blink = self._blink > 0.05
+        col = QColor(col_hex)
+        p.setPen(Qt.PenStyle.NoPen)
+
+        if eye_style == "cyclops":
+            er = r * 0.52
+            if blink:
+                p.setPen(QPen(col, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(cx - er * 0.8, cy), QPointF(cx + er * 0.8, cy))
+            else:
+                p.setBrush(col)
+                p.drawEllipse(QPointF(cx, cy), er, er)
+                p.setBrush(QColor(8, 12, 22))
+                p.drawEllipse(QPointF(cx + lx * 0.9, cy + ly * 0.9), er * 0.45, er * 0.45)
+                p.setBrush(QColor(255, 255, 255, 230))
+                p.drawEllipse(QPointF(cx + lx * 0.9 - er * 0.16, cy + ly * 0.9 - er * 0.18), er * 0.16, er * 0.16)
+            return
+
+        if eye_style == "visor":
+            vw = r * 1.65
+            vh = r * 0.46
+            p.setBrush(QColor(15, 23, 42))
+            p.setPen(QPen(col, 1.3))
+            p.drawRoundedRect(QRectF(cx - vw * 0.5, cy - vh * 0.5, vw, vh), vh * 0.45, vh * 0.45)
+            scan_x = cx + lx * 1.2 + math.sin(self._phase * 2.4) * r * 0.18
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(col)
+            p.drawEllipse(QPointF(max(cx - vw * 0.36, min(cx + vw * 0.36, scan_x)), cy + ly * 0.35), vh * 0.34, vh * 0.34)
+            return
+
+        # Standard two-eye layouts directly on black
+        sep = r * 0.46
+        ew = r * 0.30
+        eh = r * 0.38 if eye_style != "sleepy" else r * 0.16
+        for sx in (-1.0, 1.0):
+            ex = cx + sx * sep
+            if blink:
+                p.setPen(QPen(col, 1.9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(ex - ew * 0.8, cy), QPointF(ex + ew * 0.8, cy))
+                p.setPen(Qt.PenStyle.NoPen)
+                continue
+            if eye_style == "pixel":
+                pw = ew * 1.7
+                ph = eh * 1.7
+                p.setBrush(col)
+                p.drawRect(QRectF(ex - pw * 0.5 + lx * 0.45, cy - ph * 0.5 + ly * 0.45, pw, ph))
+                p.setBrush(QColor(0, 0, 0))
+                p.drawRect(QRectF(ex - pw * 0.16 + lx * 0.78, cy - ph * 0.16 + ly * 0.78, pw * 0.36, ph * 0.36))
+            elif eye_style == "cat_slit":
+                p.setBrush(col)
+                p.drawEllipse(QPointF(ex, cy), ew * 1.05, eh * 1.05)
+                p.setBrush(QColor(0, 0, 0))
+                p.drawEllipse(QPointF(ex + lx * 0.62, cy + ly * 0.52), ew * 0.28, eh * 0.78)
+            elif eye_style == "angry":
+                p.setBrush(col)
+                p.drawEllipse(QPointF(ex + lx * 0.45, cy + ly * 0.45), ew, eh * 0.85)
+                p.setBrush(QColor(0, 0, 0))
+                p.drawEllipse(QPointF(ex + lx * 0.78, cy + ly * 0.78), ew * 0.44, eh * 0.44)
+                p.setPen(QPen(col, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                brow_y = cy - eh * 0.95
+                p.drawLine(QPointF(ex - sx * ew * 0.8, brow_y + eh * 0.35), QPointF(ex + sx * ew * 0.9, brow_y - eh * 0.22))
+                p.setPen(Qt.PenStyle.NoPen)
+            elif eye_style == "neon":
+                glow = QColor(col)
+                glow.setAlpha(95)
+                p.setBrush(glow)
+                p.drawEllipse(QPointF(ex + lx * 0.45, cy + ly * 0.45), ew * 1.45, eh * 1.35)
+                p.setBrush(col)
+                p.drawEllipse(QPointF(ex + lx * 0.55, cy + ly * 0.55), ew * 0.92, eh * 0.92)
+                p.setBrush(QColor(255, 255, 255, 230))
+                p.drawEllipse(QPointF(ex + lx * 0.75 - ew * 0.18, cy + ly * 0.75 - eh * 0.2), ew * 0.28, eh * 0.28)
+            else:
+                # Crisp white sclera + dark pupil tracking cursor directly
+                p.setBrush(col)
+                p.drawEllipse(QPointF(ex, cy), ew, eh)
+                p.setBrush(QColor(10, 14, 24))
+                p.drawEllipse(QPointF(ex + lx * 0.65, cy + ly * 0.65), ew * 0.52, eh * 0.46)
+                p.setBrush(QColor(255, 255, 255, 235))
+                p.drawEllipse(QPointF(ex + lx * 0.65 - ew * 0.16, cy + ly * 0.65 - eh * 0.18), ew * 0.18, eh * 0.16)
+
+    @staticmethod
+    def _draw_builtin_addon(p: QPainter, cx: float, top_y: float, s: float, addon: str) -> None:
+        """Render top hat/ears/crown/horns sticking UP out of `top_y`."""
+        p.setPen(Qt.PenStyle.NoPen)
+        if addon == "clown_hat":
+            # Colorful striped jester/clown cone hat + yellow pom-pom sticking out
+            poly = QPolygonF([QPointF(cx - s * 0.85, top_y + 1.5), QPointF(cx + s * 0.85, top_y + 1.5), QPointF(cx, top_y - s * 1.25)])
+            p.setBrush(QColor("#EF4444"))
+            p.drawPolygon(poly)
+            stripe = QPolygonF([QPointF(cx - s * 0.42, top_y + 1.5), QPointF(cx + s * 0.42, top_y + 1.5), QPointF(cx, top_y - s * 1.25)])
+            p.setBrush(QColor("#3B82F6"))
+            p.drawPolygon(stripe)
+            p.setBrush(QColor("#FACC15"))
+            p.drawEllipse(QPointF(cx, top_y - s * 1.28), s * 0.28, s * 0.28)
+        elif addon == "cat_ears":
+            for sx in (-1.0, 1.0):
+                ear = QPolygonF([QPointF(cx + sx * s * 0.18, top_y + 1.5), QPointF(cx + sx * s * 0.92, top_y + 1.5), QPointF(cx + sx * s * 0.78, top_y - s * 0.88)])
+                p.setBrush(QColor("#1E293B"))
+                p.setPen(QPen(QColor(255, 255, 255, 110), 1.0))
+                p.drawPolygon(ear)
+                inner = QPolygonF([QPointF(cx + sx * s * 0.34, top_y + 1.0), QPointF(cx + sx * s * 0.78, top_y + 1.0), QPointF(cx + sx * s * 0.72, top_y - s * 0.56)])
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#FB7185"))
+                p.drawPolygon(inner)
+        elif addon == "devil_horns":
+            for sx in (-1.0, 1.0):
+                horn = QPolygonF([QPointF(cx + sx * s * 0.25, top_y + 1.5), QPointF(cx + sx * s * 0.82, top_y + 1.5), QPointF(cx + sx * s * 0.95, top_y - s * 0.95)])
+                p.setBrush(QColor("#DC2626"))
+                p.drawPolygon(horn)
+        elif addon == "crown":
+            crown = QPolygonF([
+                QPointF(cx - s * 0.85, top_y + 1.5),
+                QPointF(cx - s * 0.95, top_y - s * 0.75),
+                QPointF(cx - s * 0.35, top_y - s * 0.28),
+                QPointF(cx, top_y - s * 0.98),
+                QPointF(cx + s * 0.35, top_y - s * 0.28),
+                QPointF(cx + s * 0.95, top_y - s * 0.75),
+                QPointF(cx + s * 0.85, top_y + 1.5),
+            ])
+            p.setBrush(QColor("#FACC15"))
+            p.drawPolygon(crown)
+        elif addon == "halo":
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor("#FDE047"), 2.1))
+            p.drawEllipse(QPointF(cx, top_y - s * 0.58), s * 0.82, s * 0.26)
+        elif addon == "bunny_ears":
+            for sx in (-1.0, 1.0):
+                p.setBrush(QColor("#F8FAFC"))
+                p.drawEllipse(QPointF(cx + sx * s * 0.42, top_y - s * 0.55), s * 0.25, s * 0.72)
+                p.setBrush(QColor("#F9A8D4"))
+                p.drawEllipse(QPointF(cx + sx * s * 0.42, top_y - s * 0.52), s * 0.13, s * 0.48)
+        elif addon == "antenna":
+            p.setPen(QPen(QColor("#94A3B8"), 2.0))
+            p.drawLine(QPointF(cx, top_y + 1.0), QPointF(cx, top_y - s * 0.95))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#38BDF8"))
+            p.drawEllipse(QPointF(cx, top_y - s * 1.02), s * 0.26, s * 0.26)
+        elif addon == "wizard_hat":
+            brim = QRectF(cx - s * 1.05, top_y - s * 0.18, s * 2.1, s * 0.36)
+            p.setBrush(QColor("#4C1D95"))
+            p.drawRoundedRect(brim, s * 0.16, s * 0.16)
+            cone = QPolygonF([QPointF(cx - s * 0.72, top_y), QPointF(cx + s * 0.72, top_y), QPointF(cx + s * 0.15, top_y - s * 1.25)])
+            p.setBrush(QColor("#6D28D9"))
+            p.drawPolygon(cone)
+            p.setBrush(QColor("#FDE047"))
+            p.drawEllipse(QPointF(cx, top_y - s * 0.52), s * 0.15, s * 0.15)
+        elif addon == "santa_hat":
+            cone = QPolygonF([QPointF(cx - s * 0.85, top_y), QPointF(cx + s * 0.85, top_y), QPointF(cx + s * 0.35, top_y - s * 1.15)])
+            p.setBrush(QColor("#EF4444"))
+            p.drawPolygon(cone)
+            p.setBrush(QColor("#FFFFFF"))
+            p.drawRoundedRect(QRectF(cx - s * 0.95, top_y - s * 0.22, s * 1.9, s * 0.36), s * 0.16, s * 0.16)
+            p.drawEllipse(QPointF(cx + s * 0.42, top_y - s * 1.12), s * 0.24, s * 0.24)
+        elif addon == "chef_hat":
+            p.setBrush(QColor("#F8FAFC"))
+            p.drawRoundedRect(QRectF(cx - s * 0.65, top_y - s * 0.45, s * 1.3, s * 0.55), s * 0.15, s * 0.15)
+            for dx in (-0.45, 0.0, 0.45):
+                p.drawEllipse(QPointF(cx + dx * s, top_y - s * 0.58), s * 0.38, s * 0.34)
+        elif addon == "sprout":
+            p.setPen(QPen(QColor("#22C55E"), 2.0))
+            p.drawLine(QPointF(cx, top_y + 1.0), QPointF(cx, top_y - s * 0.72))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#4ADE80"))
+            p.drawEllipse(QPointF(cx - s * 0.32, top_y - s * 0.72), s * 0.34, s * 0.20)
+            p.drawEllipse(QPointF(cx + s * 0.32, top_y - s * 0.64), s * 0.32, s * 0.19)
+        elif addon == "shark_fin":
+            fin = QPolygonF([QPointF(cx - s * 0.55, top_y + 1.5), QPointF(cx + s * 0.65, top_y + 1.5), QPointF(cx + s * 0.42, top_y - s * 1.05)])
+            p.setBrush(QColor("#38BDF8"))
+            p.drawPolygon(fin)
+        elif addon == "dino_spikes":
+            p.setBrush(QColor("#34D399"))
+            for dx in (-0.55, 0.0, 0.55):
+                sp = QPolygonF([QPointF(cx + dx * s - s * 0.26, top_y + 1.5), QPointF(cx + dx * s + s * 0.26, top_y + 1.5), QPointF(cx + dx * s, top_y - s * 0.72)])
+                p.drawPolygon(sp)
+        elif addon == "headphones":
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor("#A855F7"), 2.4))
+            p.drawArc(QRectF(cx - s * 0.85, top_y - s * 0.85, s * 1.7, s * 1.5), 0, 180 * 16)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#C084FC"))
+            p.drawRoundedRect(QRectF(cx - s * 1.02, top_y - s * 0.22, s * 0.34, s * 0.55), s * 0.14, s * 0.14)
+            p.drawRoundedRect(QRectF(cx + s * 0.68, top_y - s * 0.22, s * 0.34, s * 0.55), s * 0.14, s * 0.14)
+        elif addon == "ufo_dome":
+            p.setBrush(QColor(74, 222, 128, 175))
+            p.setPen(QPen(QColor("#86EFAC"), 1.2))
+            p.drawChord(QRectF(cx - s * 0.85, top_y - s * 0.85, s * 1.7, s * 1.7), 0, 180 * 16)
+        elif addon == "bow":
+            p.setBrush(QColor("#F472B6"))
+            l_wing = QPolygonF([QPointF(cx, top_y - s * 0.35), QPointF(cx - s * 0.78, top_y - s * 0.75), QPointF(cx - s * 0.72, top_y + 0.5)])
+            r_wing = QPolygonF([QPointF(cx, top_y - s * 0.35), QPointF(cx + s * 0.78, top_y - s * 0.75), QPointF(cx + s * 0.72, top_y + 0.5)])
+            p.drawPolygon(l_wing)
+            p.drawPolygon(r_wing)
+            p.setBrush(QColor("#FBCFE8"))
+            p.drawEllipse(QPointF(cx, top_y - s * 0.36), s * 0.22, s * 0.22)
+        elif addon == "ghost_peek":
+            p.setBrush(QColor("#F8FAFC"))
+            p.drawChord(QRectF(cx - s * 0.78, top_y - s * 0.92, s * 1.56, s * 1.85), 0, 180 * 16)

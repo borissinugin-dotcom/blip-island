@@ -15,7 +15,7 @@ from pathlib import Path
 from borh_island.core.security import decrypt_secret, encrypt_secret
 
 APP_PRODUCT_NAME = "Blip"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 WORKER_BASE_URL = "https://blip-license-worker.blip-borh.workers.dev"
 ED25519_PUBLIC_KEY_B64U = "lue3Ld1hP5dYrUlXjrDRxmv6UWKl_vKAOjzmHKWJH8w"
 
@@ -436,6 +436,8 @@ class LicenseManager:
         return st
 
     def is_character_allowed(self, char_id: str) -> bool:
+        if str(char_id or "").startswith("builtin_"):
+            return True
         st = self.get_status()
         if char_id in DEV_EXCLUSIVE_CHARACTER_IDS:
             return st.all_dev_unlocked or (char_id in st.unlocked_dev_chars)

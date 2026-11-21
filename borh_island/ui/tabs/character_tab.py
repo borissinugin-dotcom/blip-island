@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from ...core.config import ConfigManager
 from ...core.i18n import set_language, tr
 from ...core.licensing import DEV_EXCLUSIVE_CHARACTER_IDS, get_license_manager
-from ..characters import CHARACTER_DEFS, CharacterWidget
+from ..characters import BUILTIN_CHARACTER_DEFS, CHARACTER_DEFS, CharacterWidget
 from ..icons import get_icon
 from ..pro_dialog import show_pro_upgrade
 from ..theme import ThemePalette, resolve_palette
@@ -80,9 +80,32 @@ class CharacterSettingsTab(QWidget):
         gv.setContentsMargins(8, 8, 8, 10)
         gv.setSpacing(6)
 
+        gal_hdr = QHBoxLayout()
+        gal_hdr.setSpacing(6)
         gal_title = QLabel(f"Персонажи ({len(CHARACTER_DEFS)})")
         gal_title.setObjectName("Section")
-        gv.addWidget(gal_title)
+        gal_hdr.addWidget(gal_title)
+        gal_hdr.addStretch(1)
+
+        self._folder_btns: dict[str, QPushButton] = {}
+        self._active_folder = "all"
+        builtin_cnt = len(BUILTIN_CHARACTER_DEFS)
+        classic_cnt = len(CHARACTER_DEFS) - builtin_cnt
+        for f_key, f_lbl in (
+            ("all", f"Все ({len(CHARACTER_DEFS)})"),
+            ("builtin", f"📁 Встроенные ({builtin_cnt})"),
+            ("classic", f"3D / Классика ({classic_cnt})"),
+        ):
+            fb = QPushButton(f_lbl)
+            fb.setCheckable(True)
+            fb.setChecked(f_key == "all")
+            fb.setCursor(Qt.CursorShape.PointingHandCursor)
+            fb.setFixedHeight(26)
+            fb.setStyleSheet("border-radius: 13px; padding: 0px 10px; font-size: 11px; font-weight: 600;")
+            fb.clicked.connect(lambda _chk=False, fk=f_key: self._set_folder(fk))
+            self._folder_btns[f_key] = fb
+            gal_hdr.addWidget(fb)
+        gv.addLayout(gal_hdr)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -90,13 +113,15 @@ class CharacterSettingsTab(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         body = QWidget()
-        grid = QGridLayout(body)
+        self._gal_grid = QGridLayout(body)
+        grid = self._gal_grid
         grid.setContentsMargins(0, 0, 4, 2)
         grid.setSpacing(5)
         cols = 7
         for c in range(cols):
             grid.setColumnStretch(c, 1)
         lang = self.config_mgr.config.language
+        self._char_cells: list[tuple[str, QFrame]] = []
         for idx, (cid, n_ru, n_en) in enumerate(CHARACTER_DEFS):
             cell = QFrame()
             cell.setObjectName("Surface")
@@ -124,6 +149,7 @@ class CharacterSettingsTab(QWidget):
             cv.addWidget(thumb, 0, Qt.AlignmentFlag.AlignCenter)
             cv.addWidget(btn)
             grid.addWidget(cell, idx // cols, idx % cols)
+            self._char_cells.append((cid, cell))
 
         scroll.setWidget(body)
         gv.addWidget(scroll, 1)
@@ -134,6 +160,27 @@ class CharacterSettingsTab(QWidget):
         self._thumb_timer.setInterval(65)
         self._thumb_timer.timeout.connect(self._step_gallery_thumbs)
         self.sync_from_config()
+
+    def _set_folder(self, folder: str) -> None:
+        self._active_folder = folder
+        for k, fb in self._folder_btns.items():
+            fb.blockSignals(True)
+            fb.setChecked(k == folder)
+            fb.blockSignals(False)
+        cols = 7
+        vis_idx = 0
+        for cid, cell in self._char_cells:
+            is_builtin = cid.startswith("builtin_")
+            show = (
+                folder == "all"
+                or (folder == "builtin" and is_builtin)
+                or (folder == "classic" and not is_builtin)
+            )
+            self._gal_grid.removeWidget(cell)
+            cell.setVisible(show)
+            if show:
+                self._gal_grid.addWidget(cell, vis_idx // cols, vis_idx % cols)
+                vis_idx += 1
 
     def _step_gallery_thumbs(self) -> None:
         for t in self._card_thumbs:
