@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Secrets & local user configs/data
+.secrets/
+cloudflare_worker/.secrets/
+*.jwk.json
+kv_bulk_*.json
+*.db
+*.sqlite
+*.log
+Текстовый документ*.txt
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

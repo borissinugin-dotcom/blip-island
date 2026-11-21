@@ -1,0 +1,15 @@
+name = "blip-license-worker"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+# Тестовая минимальная сумма в рублях (после тестов поменять на "300")
+MIN_AMOUNT_RUB = "10"
+PRODUCT_NAME = "Blip"
+
+# Создайте KV namespace командой:
+#   npx wrangler kv namespace create BLIP_KV
+# и вставьте полученный id ниже:
+[[kv_namespaces]]
+binding = "BLIP_KV"
+id = "98ce6cbe2a5c42438d4e9903b7d9c1f5"
