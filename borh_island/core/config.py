@@ -201,7 +201,7 @@ class AppConfig:
     blue_light_filter: bool = False
     pill_mode: str = "track"  # compact | track | miniplayer
     liquid_drop: bool = True
-    glass_mode: str = "liquid"  # off | liquid | frost
+    glass_mode: str = "frost"  # off | frost
     pill_glass_mode: str = "auto"  # auto | off | liquid | frost
     notification_glass_mode: str = "auto"  # auto | off | liquid | frost
     refraction_quality: str = "ultra"  # low | medium | high | ultra

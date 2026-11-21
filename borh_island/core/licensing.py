@@ -15,7 +15,7 @@ from pathlib import Path
 from borh_island.core.security import decrypt_secret, encrypt_secret
 
 APP_PRODUCT_NAME = "Blip"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 WORKER_BASE_URL = "https://blip-license-worker.blip-borh.workers.dev"
 ED25519_PUBLIC_KEY_B64U = "lue3Ld1hP5dYrUlXjrDRxmv6UWKl_vKAOjzmHKWJH8w"
 

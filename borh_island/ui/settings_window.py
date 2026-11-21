@@ -564,6 +564,16 @@ class SettingsWindow(QDialog):
         upd_row.addWidget(self.upd_status_lbl, 1)
         upd_row.addWidget(self.upd_check_btn)
         ac_lay.addLayout(upd_row)
+
+        try:
+            from ..core.licensing import LicenseManager
+
+            if LicenseManager().get_status().is_master:
+                master_btn = QPushButton("🛡️ Управление кодами (Master BORh)")
+                master_btn.clicked.connect(self._open_master_code_control)
+                ac_lay.addWidget(master_btn)
+        except Exception:
+            pass
         v.addWidget(atmo_card)
 
         # Dev Tools (QR, URL, Base64, JSON) hidden from main island UI by default
@@ -666,6 +676,12 @@ class SettingsWindow(QDialog):
                 cb.setCurrentIndex(idx)
             cb.blockSignals(False)
         self._apply_atmosphere_live()
+
+    def _open_master_code_control(self) -> None:
+        from .pro_dialog import BlipProWidget
+
+        w = BlipProWidget(self, inline=True)
+        w._open_master_control()
 
     def _check_github_updates(self) -> None:
         import threading

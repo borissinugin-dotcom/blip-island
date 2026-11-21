@@ -3642,47 +3642,19 @@ class IslandWindow(QWidget):
         liquid_pull = (self._drop_amp > 0.02) or (self._indent_amp > 0.02)
         scroll_running = bool(getattr(self.panel, "_smooth_scroll_active", False))
         fast_motion = morph_running or scroll_running or liquid_pull
-        # Cache downscaled frost / soft-refraction numpy buffers across scroll & tab-switch frames
-        if glass_mode == "frost" or fast_motion:
-            f_q = "low" if fast_motion else ref_q
-            fk = (bg_sig, f_q, bg_src.width(), bg_src.height()) if bg_sig is not None else None
-            fc = getattr(self, "_frost_bg_cache", None)
-            if fk is not None and fc is not None and fc[0] == fk:
-                frost_img = fc[1]
-            else:
-                frost_img = build_frost_bg_image(bg_src, quality=f_q)
-                if fk is not None:
-                    self._frost_bg_cache = (fk, frost_img)
-            fw, fh = float(self.width()), float(self.height())
-            render_frost_batch(p, card_targets, frost_img, fw, fh)
-            render_frost_batch(p, btn_targets, frost_img, fw, fh)
+        # Fast cached Frost Glass across all cards & buttons (Liquid Glass removed to eliminate render stutter)
+        f_q = "low" if fast_motion else ref_q
+        fk = (bg_sig, f_q, bg_src.width(), bg_src.height()) if bg_sig is not None else None
+        fc = getattr(self, "_frost_bg_cache", None)
+        if fk is not None and fc is not None and fc[0] == fk:
+            frost_img = fc[1]
         else:
-            import numpy as np
-
-            lk = (bg_sig, ref_q, bg_src.width(), bg_src.height(), self.width()) if bg_sig is not None else None
-            lc = getattr(self, "_liquid_prep_cache", None)
-            if lk is not None and lc is not None and lc[0] == lk:
-                img_w, img_h, bg_scale, bg_u8, bg_flat = lc[1]
-            else:
-                bg_img, bg_scale = build_soft_liquid_bg_image(bg_src, float(self.width()), quality=ref_q)
-                img_w, img_h = bg_img.width(), bg_img.height()
-                ptr = bg_img.bits()
-                ptr.setsize(bg_img.sizeInBytes())
-                bg_u8 = np.frombuffer(ptr, dtype=np.uint8).reshape((-1, 4)).copy()
-                bg_flat = bg_u8.astype(np.uint16)
-                if lk is not None:
-                    self._liquid_prep_cache = (lk, (img_w, img_h, bg_scale, bg_u8, bg_flat))
-            for cr, rad, clip_r, op in card_targets:
-                p.setOpacity(op)
-                render_3d_refraction_card(
-                    p, cr, rad, bg_flat, img_w, img_h, bg_scale=bg_scale, clip_rect=clip_r, quality=ref_q, bg_u8=bg_u8
-                )
-            for br_r, rad, clip_r, op in btn_targets:
-                p.setOpacity(op)
-                render_3d_refraction_card(
-                    p, br_r, rad, bg_flat, img_w, img_h, bg_scale=bg_scale, clip_rect=clip_r, quality=ref_q, bg_u8=bg_u8
-                )
-            p.setOpacity(1.0)
+            frost_img = build_frost_bg_image(bg_src, quality=f_q)
+            if fk is not None:
+                self._frost_bg_cache = (fk, frost_img)
+        fw, fh = float(self.width()), float(self.height())
+        render_frost_batch(p, card_targets, frost_img, fw, fh)
+        render_frost_batch(p, btn_targets, frost_img, fw, fh)
 
         p.restore()
 
@@ -3987,7 +3959,9 @@ class IslandWindow(QWidget):
             lic = get_license_manager()
             cfg = self.config_mgr.config
             use_weather_atmo = self._use_weather_appearance()
-            glass_mode = str(getattr(cfg, "glass_mode", "liquid") or "liquid").lower()
+            glass_mode = str(getattr(cfg, "glass_mode", "frost") or "frost").lower()
+            if glass_mode == "liquid":
+                glass_mode = "frost"
             if not lic.is_feature_allowed("glass"):
                 glass_mode = "off"
             eff_weather = (
@@ -3995,7 +3969,7 @@ class IslandWindow(QWidget):
                 if (cfg.atmosphere_weather_mode == "auto" and not lic.is_feature_allowed("realtime_weather"))
                 else cfg.atmosphere_weather_mode
             )
-            use_glass = glass_mode in ("liquid", "frost")
+            use_glass = glass_mode == "frost"
             p.save()
             p.setClipPath(path)
             canvas_rect = QRectF(0.0, 0.0, float(self.width()), float(self.height()))

@@ -586,11 +586,12 @@ class ControlsTab(QWidget):
         glass_row.setSpacing(6)
         self._glass_btns: dict[str, QPushButton] = {}
         glass_specs = (
-            ("liquid", "Liquid Glass"),
             ("frost", "Frost Glass"),
             ("off", "Выкл (Чёрный)" if cfg.language == "ru" else "Off (Dark)"),
         )
-        cur_gm = str(getattr(cfg, "glass_mode", "liquid") or "liquid").lower()
+        cur_gm = str(getattr(cfg, "glass_mode", "frost") or "frost").lower()
+        if cur_gm == "liquid":
+            cur_gm = "frost"
         for gm_key, gm_label in glass_specs:
             gb = QPushButton(gm_label)
             gb.setCheckable(True)
