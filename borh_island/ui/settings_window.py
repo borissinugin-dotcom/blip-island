@@ -668,25 +668,53 @@ class SettingsWindow(QDialog):
         self._apply_atmosphere_live()
 
     def _check_github_updates(self) -> None:
+        import threading
+        from PyQt6.QtWidgets import QMessageBox
         from ..services.updater_service import check_github_updates, download_and_stage_update
 
         self.upd_check_btn.setEnabled(False)
         self.upd_status_lbl.setText("Проверяю GitHub...")
-        QApplication.processEvents()
-        info = check_github_updates()
-        self.upd_check_btn.setEnabled(True)
-        if info.error:
-            self.upd_status_lbl.setText(f"Ошибка: {info.error[:48]}")
-            return
-        if not info.available:
-            self.upd_status_lbl.setText(f"Установлена актуальная версия v{info.current_version}")
-            return
-        self.upd_status_lbl.setText(f"Доступна v{info.latest_version} — скачиваю...")
-        QApplication.processEvents()
-        ok, msg = download_and_stage_update(info)
-        self.upd_status_lbl.setText(msg[:64])
-        if ok and getattr(sys, "frozen", False):
-            QTimer.singleShot(500, QApplication.quit)
+        result_box: dict[str, object] = {}
+
+        def _worker() -> None:
+            info = check_github_updates()
+            if info.error or not info.available:
+                result_box["info"] = info
+                return
+            ok, msg = download_and_stage_update(info)
+            result_box["info"] = info
+            result_box["ok"] = ok
+            result_box["msg"] = msg
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+        def _poll() -> None:
+            if t.is_alive():
+                QTimer.singleShot(120, _poll)
+                return
+            self.upd_check_btn.setEnabled(True)
+            info = result_box.get("info")
+            if info is None:
+                self.upd_status_lbl.setText("Ошибка проверки обновлений")
+                return
+            if getattr(info, "error", ""):
+                self.upd_status_lbl.setText(f"Ошибка: {info.error[:48]}")
+                QMessageBox.warning(self, "Обновление Blip", f"Не удалось проверить GitHub:\n{info.error}")
+                return
+            if not getattr(info, "available", False):
+                self.upd_status_lbl.setText(f"Установлена актуальная версия v{info.current_version}")
+                QMessageBox.information(self, "Обновление Blip", f"У вас уже актуальная версия v{info.current_version}.")
+                return
+            ok = bool(result_box.get("ok", False))
+            msg = str(result_box.get("msg", ""))
+            self.upd_status_lbl.setText(msg[:64])
+            if ok:
+                QTimer.singleShot(400, QApplication.quit)
+            else:
+                QMessageBox.warning(self, "Обновление Blip", msg)
+
+        QTimer.singleShot(120, _poll)
 
     def _run_settings_text_tool(self, fn) -> None:
         src = self.settings_tool_in.toPlainText()

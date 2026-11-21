@@ -59,10 +59,12 @@ def check_github_updates(repo: str = GITHUB_REPO, timeout: float = 8.0) -> Updat
             if name.endswith(".exe"):
                 exe_url = str(asset.get("browser_download_url") or "").strip()
                 break
-        if not exe_url:
-            exe_url = str(data.get("html_url") or "").strip()
-        avail = bool(exe_url) and _parse_ver(latest) > _parse_ver(APP_VERSION)
-        return UpdateInfo(avail, APP_VERSION, latest, exe_url, "", notes)
+        zip_url = str(data.get("zipball_url") or "").strip()
+        dl_url = exe_url if getattr(sys, "frozen", False) else (zip_url or exe_url)
+        if not dl_url:
+            dl_url = str(data.get("html_url") or "").strip()
+        avail = bool(dl_url) and _parse_ver(latest) > _parse_ver(APP_VERSION)
+        return UpdateInfo(avail, APP_VERSION, latest, dl_url, "", notes)
     except Exception as exc:
         return UpdateInfo(False, APP_VERSION, APP_VERSION, error=str(exc))
 
@@ -101,33 +103,68 @@ def download_and_stage_update(info: UpdateInfo, project_dir: Path | None = None)
     if not info.available or not info.download_url:
         return False, "Обновление не требуется"
 
-    # Remote GitHub .exe update flow (preserves all user configs/licenses in AppData)
+    # Remote GitHub update flow (.exe for frozen builds, zipball for Python source)
     if info.download_url.startswith(("http://", "https://")):
         try:
             import httpx
 
-            if not info.download_url.lower().endswith(".exe"):
-                return False, f"Откройте релиз вручную: {info.download_url}"
             stage_root = Path(tempfile.mkdtemp(prefix="blip_update_"))
-            new_exe = stage_root / "BlipIsland_new.exe"
+            is_exe = info.download_url.lower().endswith(".exe")
+            if is_exe:
+                new_exe = stage_root / "BlipIsland_new.exe"
+                with httpx.Client(timeout=180.0, follow_redirects=True) as client:
+                    with client.stream("GET", info.download_url) as resp:
+                        resp.raise_for_status()
+                        with new_exe.open("wb") as fh:
+                            for chunk in resp.iter_bytes(chunk_size=131072):
+                                if chunk:
+                                    fh.write(chunk)
+                if not getattr(sys, "frozen", False):
+                    return True, f"Новый .exe скачан в {new_exe}"
+                pid = os.getpid()
+                cur_exe = Path(sys.executable).resolve()
+                bat_path = stage_root / "apply_exe_update.bat"
+                bat_content = (
+                    "@echo off\r\n"
+                    "timeout /t 2 /nobreak >nul\r\n"
+                    f":waitloop\r\ntasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul && (timeout /t 1 /nobreak >nul & goto waitloop)\r\n"
+                    f"move /Y \"{new_exe}\" \"{cur_exe}\" >nul\r\n"
+                    f"start \"\" \"{cur_exe}\" --replace\r\n"
+                )
+                bat_path.write_text(bat_content, encoding="utf-8")
+                subprocess.Popen(
+                    ["cmd.exe", "/c", str(bat_path)],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    close_fds=True,
+                )
+                return True, f"Обновление до v{info.latest_version} загружено. Перезапуск..."
+
+            # Source zipball update
+            zip_path = stage_root / "source.zip"
             with httpx.Client(timeout=120.0, follow_redirects=True) as client:
-                with client.stream("GET", info.download_url) as resp:
+                with client.stream("GET", info.download_url, headers={"User-Agent": f"BlipIsland/{APP_VERSION}"}) as resp:
                     resp.raise_for_status()
-                    with new_exe.open("wb") as fh:
-                        for chunk in resp.iter_bytes(chunk_size=131072):
+                    with zip_path.open("wb") as fh:
+                        for chunk in resp.iter_bytes(chunk_size=65536):
                             if chunk:
                                 fh.write(chunk)
-            if not getattr(sys, "frozen", False):
-                return True, f"Новый .exe скачан в {new_exe} (вы запущены из исходников Python)"
+            extract_dir = stage_root / "src"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(extract_dir)
+            subdirs = [p for p in extract_dir.iterdir() if p.is_dir()]
+            src_root = subdirs[0] if len(subdirs) == 1 else extract_dir
+            target_dir = project_dir or Path(__file__).resolve().parent.parent.parent
             pid = os.getpid()
-            cur_exe = Path(sys.executable).resolve()
-            bat_path = stage_root / "apply_exe_update.bat"
+            bat_path = stage_root / "apply_src_update.bat"
+            launch_exe = sys.executable
+            main_py = target_dir / "main.py"
             bat_content = (
                 "@echo off\r\n"
                 "timeout /t 2 /nobreak >nul\r\n"
                 f":waitloop\r\ntasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul && (timeout /t 1 /nobreak >nul & goto waitloop)\r\n"
-                f"move /Y \"{new_exe}\" \"{cur_exe}\" >nul\r\n"
-                f"start \"\" \"{cur_exe}\" --replace\r\n"
+                f"xcopy /E /Y /I \"{src_root}\\*\" \"{target_dir}\\\" >nul\r\n"
+                f"start \"\" \"{launch_exe}\" \"{main_py}\" --replace\r\n"
             )
             bat_path.write_text(bat_content, encoding="utf-8")
             subprocess.Popen(
@@ -135,7 +172,7 @@ def download_and_stage_update(info: UpdateInfo, project_dir: Path | None = None)
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 close_fds=True,
             )
-            return True, f"Обновление до v{info.latest_version} загружено. Перезапуск..."
+            return True, f"Исходники обновлены до v{info.latest_version}. Перезапуск..."
         except Exception as exc:
             return False, f"Ошибка скачивания: {exc}"
 

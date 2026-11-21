@@ -15,7 +15,7 @@ from pathlib import Path
 from borh_island.core.security import decrypt_secret, encrypt_secret
 
 APP_PRODUCT_NAME = "Blip"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 WORKER_BASE_URL = "https://blip-license-worker.blip-borh.workers.dev"
 ED25519_PUBLIC_KEY_B64U = "lue3Ld1hP5dYrUlXjrDRxmv6UWKl_vKAOjzmHKWJH8w"
 
@@ -24,6 +24,8 @@ FREE_CHARACTER_IDS: tuple[str, ...] = ("liquid", "orb", "bot")
 DEV_EXCLUSIVE_CHARACTER_IDS: tuple[str, ...] = ("borscht", "purple_star", "kamaz", "meimei")
 
 _DEV_SALT = "BlipDevSalt::2026::Ed25519"
+_MASTER_BORH_HASH = "b831ffb499b2a3a9a6c56da7001d1a8114552f9386a487fb1c3011791e6701a0"
+CODE_POLICIES_URL = "https://raw.githubusercontent.com/borissinugin-dotcom/blip-island/main/code_policies.json"
 # Salted SHA-256 digests of developer codes (never stored in plaintext)
 _DEV_CODE_HASHES: dict[str, dict[str, object]] = {
     "ce872be183e8674204aad6395a4e4f60845a6510081a973214f2022889ab2595": {
@@ -255,6 +257,11 @@ class LicenseStatus:
     all_dev_unlocked: bool = False
     badge_text: str = "FREE"
     source: str = "trial"
+    is_master: bool = False
+    payment_blocked: bool = False
+    forced_free: bool = False
+    revoked_reason: str = ""
+    blocked_features: tuple[str, ...] = ()
 
 
 class LicenseManager:
@@ -267,6 +274,7 @@ class LicenseManager:
         self.appdata_dir.mkdir(parents=True, exist_ok=True)
         self.hwid = get_hwid()
         self._cached_status: LicenseStatus | None = None
+        self._policies_synced = False
 
     @property
     def project_license_path(self) -> Path:
@@ -283,6 +291,106 @@ class LicenseManager:
     @property
     def _dev_file(self) -> Path:
         return self.appdata_dir / "dev_unlock.dat"
+
+    @property
+    def _policies_cache_file(self) -> Path:
+        return self.appdata_dir / "code_policies_cache.json"
+
+    @staticmethod
+    def hash_dev_code(code: str) -> str:
+        return hashlib.sha256((_DEV_SALT + str(code or "").strip()).encode("utf-8")).hexdigest()
+
+    def load_code_policies(self) -> dict[str, dict]:
+        """Load per-code access policies from repo file or local cache."""
+        for p in (self._policies_cache_file, self.project_dir / "code_policies.json"):
+            if p.exists():
+                try:
+                    raw = json.loads(p.read_text(encoding="utf-8"))
+                    pols = raw.get("policies") if isinstance(raw, dict) else None
+                    if isinstance(pols, dict):
+                        return {str(k): dict(v) for k, v in pols.items() if isinstance(v, dict)}
+                except Exception:
+                    pass
+        return {}
+
+    def sync_code_policies_bg(self) -> None:
+        """Fetch latest code_policies.json from GitHub in background without blocking UI."""
+        if self._policies_synced:
+            return
+        self._policies_synced = True
+        import threading
+
+        def _worker() -> None:
+            try:
+                import httpx
+
+                with httpx.Client(timeout=6.0, follow_redirects=True) as client:
+                    r = client.get(CODE_POLICIES_URL, headers={"Cache-Control": "no-cache"})
+                    if r.status_code == 200:
+                        data = r.json()
+                        if isinstance(data, dict) and isinstance(data.get("policies"), dict):
+                            self._policies_cache_file.write_text(
+                                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+                            )
+                            self.invalidate_cache()
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def set_code_policy(
+        self,
+        code_or_hash: str,
+        *,
+        mode: str = "active",
+        block_payment: bool = False,
+        blocked_features: list[str] | tuple[str, ...] = (),
+        label: str = "",
+        push_github: bool = True,
+    ) -> tuple[bool, str]:
+        """Set access policy for an existing developer code (Master key BORhBaRsMEYY673514 only)."""
+        st = self.get_status()
+        if not st.is_master:
+            return False, "Доступно только по мастер-коду BORh"
+        raw = str(code_or_hash or "").strip()
+        if not raw:
+            return False, "Укажите код или его SHA-256 хеш"
+        h = raw.lower() if len(raw) == 64 and all(c in "0123456789abcdef" for c in raw.lower()) else self.hash_dev_code(raw)
+        if h == _MASTER_BORH_HASH:
+            return False, "Мастер-код нельзя заблокировать"
+        policies = self.load_code_policies()
+        if mode == "active" and not block_payment and not blocked_features:
+            policies.pop(h, None)
+        else:
+            policies[h] = {
+                "mode": mode,
+                "block_payment": bool(block_payment),
+                "blocked_features": list(blocked_features),
+                "label": label or raw[:12],
+                "updated_at": int(time.time()),
+            }
+        payload = {"policies": policies}
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        self._policies_cache_file.write_text(text, encoding="utf-8")
+        repo_file = self.project_dir / "code_policies.json"
+        if (self.project_dir / ".git").exists() or repo_file.exists():
+            try:
+                repo_file.write_text(text + "\n", encoding="utf-8")
+                if push_github and (self.project_dir / ".git").exists():
+                    import subprocess
+
+                    subprocess.run(["git", "add", "code_policies.json"], cwd=str(self.project_dir), check=False, capture_output=True)
+                    subprocess.run(
+                        ["git", "-c", "user.name=Borh", "-c", "user.email=borh@local", "commit", "-m", "Update code_policies.json"],
+                        cwd=str(self.project_dir),
+                        check=False,
+                        capture_output=True,
+                    )
+                    subprocess.run(["git", "push", "origin", "main"], cwd=str(self.project_dir), check=False, capture_output=True)
+            except Exception:
+                pass
+        self.invalidate_cache()
+        return True, "Политика кода обновлена"
 
     def invalidate_cache(self) -> None:
         self._cached_status = None
@@ -356,13 +464,24 @@ class LicenseManager:
         except Exception:
             pass
 
-    def _load_dev_unlock(self) -> tuple[bool, set[str], bool]:
+    def _load_dev_unlock(self) -> tuple[bool, set[str], bool, bool, dict]:
         data = self._read_dpapi_json(self._dev_file, "DevUnlock")
         if not data or not hmac.compare_digest(str(data.get("hwid", "")), self.hwid):
-            return False, set(), False
+            return False, set(), False, False, {}
+        used_codes = [str(x) for x in data.get("used_codes", [])]
+        is_master = _MASTER_BORH_HASH in used_codes
+        if not is_master and used_codes:
+            policies = self.load_code_policies()
+            for ch in used_codes:
+                pol = policies.get(ch)
+                if pol and pol.get("mode") in ("revoked", "forced_free"):
+                    return False, set(), False, False, pol
+                if pol and pol.get("blocked_features"):
+                    chars = {str(c) for c in data.get("chars", []) if str(c) in DEV_EXCLUSIVE_CHARACTER_IDS}
+                    return bool(data.get("pro", False)), chars, bool(data.get("all_unlocked", False)), False, pol
         chars = {str(c) for c in data.get("chars", []) if str(c) in DEV_EXCLUSIVE_CHARACTER_IDS}
         all_u = bool(data.get("all_unlocked", False))
-        return bool(data.get("pro", False)), chars, all_u
+        return bool(data.get("pro", False)), chars, all_u, is_master, {}
 
     def _check_trial(self) -> tuple[bool, float]:
         now = time.time()
@@ -391,13 +510,33 @@ class LicenseManager:
         return False, 0.0
 
     def get_status(self, force_refresh: bool = False) -> LicenseStatus:
+        self.sync_code_policies_bg()
         if self._cached_status is not None and not force_refresh:
             return self._cached_status
 
-        dev_pro, dev_chars, all_dev = self._load_dev_unlock()
+        dev_pro, dev_chars, all_dev, is_master, active_pol = self._load_dev_unlock()
         paid_payload = self._load_paid_license()
+        pol_mode = str(active_pol.get("mode") or "")
+        pay_blocked = bool(active_pol.get("block_payment", False)) and not is_master
+        blocked_feats = tuple(str(x) for x in active_pol.get("blocked_features", ()) if x) if not is_master else ()
 
-        if paid_payload is not None or dev_pro:
+        if (pol_mode in ("revoked", "forced_free")) and not is_master:
+            st = LicenseStatus(
+                tier="FREE",
+                is_pro=False,
+                is_permanent_pro=False,
+                trial_days_left=0.0,
+                unlocked_dev_chars=set(),
+                all_dev_unlocked=False,
+                badge_text="FREE",
+                source="revoked" if pol_mode == "revoked" else "forced_free",
+                is_master=False,
+                payment_blocked=pay_blocked,
+                forced_free=True,
+                revoked_reason="Код заблокирован разработчиком" if pol_mode == "revoked" else "Включён бесплатный режим",
+                blocked_features=blocked_feats,
+            )
+        elif paid_payload is not None or dev_pro:
             st = LicenseStatus(
                 tier="PRO",
                 is_pro=True,
@@ -407,6 +546,9 @@ class LicenseManager:
                 all_dev_unlocked=all_dev,
                 badge_text="PRO",
                 source="dev_code" if dev_pro else "license",
+                is_master=is_master,
+                payment_blocked=pay_blocked,
+                blocked_features=blocked_feats,
             )
         else:
             trial_ok, days_left = self._check_trial()
@@ -420,6 +562,9 @@ class LicenseManager:
                     all_dev_unlocked=all_dev,
                     badge_text="PRO",
                     source="trial",
+                    is_master=is_master,
+                    payment_blocked=pay_blocked,
+                    blocked_features=blocked_feats,
                 )
             else:
                 st = LicenseStatus(
@@ -431,6 +576,9 @@ class LicenseManager:
                     all_dev_unlocked=all_dev,
                     badge_text="FREE",
                     source="expired",
+                    is_master=is_master,
+                    payment_blocked=pay_blocked,
+                    blocked_features=blocked_feats,
                 )
         self._cached_status = st
         return st
@@ -447,6 +595,8 @@ class LicenseManager:
 
     def is_feature_allowed(self, feature: str) -> bool:
         st = self.get_status()
+        if feature in st.blocked_features and not st.is_master:
+            return False
         if st.is_pro or st.all_dev_unlocked:
             return True
         return feature not in ("glass", "realtime_weather", "weather", "game_stats", "timer", "cursor_shield")
@@ -475,11 +625,14 @@ class LicenseManager:
         digest = hashlib.sha256((_DEV_SALT + code).encode("utf-8")).hexdigest()
         dev_spec = _DEV_CODE_HASHES.get(digest)
         if dev_spec is not None:
+            pol = self.load_code_policies().get(digest)
+            if pol and pol.get("mode") == "revoked" and digest != _MASTER_BORH_HASH:
+                return False, "Этот код разработчика заблокирован"
             dev_data = self._read_dpapi_json(self._dev_file, "DevUnlock") or {}
             used_codes = [str(x) for x in dev_data.get("used_codes", [])] if hmac.compare_digest(str(dev_data.get("hwid", "")), self.hwid) else []
             if digest in used_codes:
                 return False, "Этот код разработчика уже был использован!"
-            _, existing_chars, existing_all = self._load_dev_unlock()
+            _, existing_chars, existing_all, _, _ = self._load_dev_unlock()
             new_chars = sorted(existing_chars | set(dev_spec["chars"]))  # type: ignore[arg-type]
             all_u = existing_all or bool(dev_spec["all_unlocked"])
             used_codes.append(digest)

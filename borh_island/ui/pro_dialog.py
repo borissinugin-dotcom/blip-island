@@ -151,6 +151,12 @@ class BlipProWidget(QWidget):
         self.status_lbl.setWordWrap(True)
         self.status_lbl.setStyleSheet("font-size: 12px; background: transparent;")
         root.addWidget(self.status_lbl)
+
+        self.master_btn = QPushButton("🛡️ Управление кодами (Master BORh)")
+        self.master_btn.setObjectName("Secondary")
+        self.master_btn.setVisible(False)
+        self.master_btn.clicked.connect(self._open_master_control)
+        root.addWidget(self.master_btn)
         root.addStretch(1)
 
         self.refresh_status(reason)
@@ -166,7 +172,13 @@ class BlipProWidget(QWidget):
         self.title_lbl.setText(tier_txt)
 
         is_paid_pro = st.is_permanent_pro and getattr(st, "source", "") != "dev_code"
-        if is_paid_pro:
+        if getattr(st, "payment_blocked", False):
+            self.qr_btn.setEnabled(False)
+            self.qr_btn.setText("Оплата отключена для вашего кода")
+            self.browser_btn.setVisible(False)
+            self.embedded_pay_btn.setVisible(False)
+            self.qr_lbl.setVisible(False)
+        elif is_paid_pro:
             self.qr_btn.setEnabled(False)
             self.qr_btn.setText("У вас уже есть Blip PRO")
             self.browser_btn.setVisible(False)
@@ -176,7 +188,11 @@ class BlipProWidget(QWidget):
             self.qr_btn.setEnabled(True)
             self.qr_btn.setText("Перейти к оплате — 300 ₽ / 3 мес")
 
-        if st.tier == "TRIAL" and not reason:
+        self.master_btn.setVisible(bool(getattr(st, "is_master", False)))
+
+        if getattr(st, "revoked_reason", "") and not reason:
+            reason = st.revoked_reason
+        elif st.tier == "TRIAL" and not reason:
             reason = (
                 f"У вас Trial-версия на 3 часа (осталось {format_trial_remaining(st.trial_days_left)}). "
                 "Оплатите 300 ₽ за 3 месяца, если хотите активировать Blip PRO сразу."
@@ -301,6 +317,67 @@ class BlipProWidget(QWidget):
             self._poll_timer.stop()
             self.refresh_status()
             self.license_updated.emit()
+
+    def _open_master_control(self) -> None:
+        from PyQt6.QtWidgets import QCheckBox, QComboBox, QFormLayout
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Управление кодами (Master BORh)")
+        dlg.setMinimumWidth(440)
+        dlg.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        form = QFormLayout(dlg)
+        code_box = QComboBox()
+        code_box.setEditable(True)
+        for c in (
+            "BLIP-FULL-C23EA8D2",
+            "BLIP-FULL-F0739A26",
+            "BLIP-FULL-777A3C47",
+            "BLIP-FULL-C5DBA0B1",
+            "NOvaBEaSt1488",
+            "kamaz19367buLLDOZA",
+            "vanyyBARsiK3825492",
+        ):
+            code_box.addItem(c)
+        mode_box = QComboBox()
+        mode_box.addItem("Активен (полный доступ)", "active")
+        mode_box.addItem("Бесплатный режим (FREE)", "forced_free")
+        mode_box.addItem("Полная блокировка кода", "revoked")
+        chk_block_pay = QCheckBox("Запретить оплату подписки этому коду")
+        chk_block_pay.setChecked(True)
+        feat_edit = QLineEdit()
+        feat_edit.setPlaceholderText("Необязательно: glass, ai, realtime_weather, game_stats")
+
+        status_lbl = QLabel("")
+        status_lbl.setWordWrap(True)
+
+        def _apply() -> None:
+            feats = [x.strip() for x in feat_edit.text().split(",") if x.strip()]
+            ok, msg = self.mgr.set_code_policy(
+                code_box.currentText().strip(),
+                mode=str(mode_box.currentData() or "active"),
+                block_payment=bool(chk_block_pay.isChecked()),
+                blocked_features=feats,
+                push_github=True,
+            )
+            status_lbl.setText(msg)
+            if ok:
+                self.refresh_status()
+                self.license_updated.emit()
+
+        apply_btn = QPushButton("Применить и обновить на GitHub")
+        apply_btn.clicked.connect(_apply)
+        form.addRow("Код пользователя:", code_box)
+        form.addRow("Режим доступа:", mode_box)
+        form.addRow("", chk_block_pay)
+        form.addRow("Блок функций:", feat_edit)
+        form.addRow(apply_btn)
+        form.addRow(status_lbl)
+        dlg.exec()
 
     def _import_lic(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Выберите файл лицензии", "", "Blip License (*.lic *.json)")
