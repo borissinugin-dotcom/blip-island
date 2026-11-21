@@ -2179,12 +2179,12 @@ class CharacterWidget(QWidget):
     }
 
     def has_island_top_addon(self) -> bool:
-        spec = self._BUILTIN_SPECS.get(self._character_id)
+        spec = self._BUILTIN_SPECS.get(self.character_id)
         return bool(spec and spec[2] != "none")
 
     def paint_island_top_addon(self, p: QPainter, core: QRectF, char_center_x: float) -> None:
         """Draw hats/ears/crowns/horns sticking out above the top edge of the collapsed black island."""
-        spec = self._BUILTIN_SPECS.get(self._character_id)
+        spec = self._BUILTIN_SPECS.get(self.character_id)
         if not spec or spec[2] == "none":
             return
         p.save()
@@ -2193,7 +2193,7 @@ class CharacterWidget(QWidget):
         p.restore()
 
     def _draw_builtin(self, p: QPainter, cx: float, cy: float, r: float) -> None:
-        spec = self._BUILTIN_SPECS.get(self._character_id, ("round", "#FFFFFF", "none"))
+        spec = self._BUILTIN_SPECS.get(self.character_id, ("round", "#FFFFFF", "none"))
         eye_style, col_hex, addon = spec
         # In gallery thumbnails (not inside collapsed pill), draw dark backing & mini peeking addon
         in_pill = self.width() <= 32 and self.height() <= 32
