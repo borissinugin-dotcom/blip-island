@@ -58,7 +58,7 @@ function buildYooMoneyPayUrl(wallet, amountRub, orderId) {
   const params = new URLSearchParams({
     receiver: String(wallet || "").trim(),
     "quickpay-form": "shop",
-    targets: `Blip PRO Lifetime (${orderId})`,
+    targets: `Blip PRO (3 месяца) (${orderId})`,
     sum: String(amountRub),
     label: orderId,
   });
@@ -74,7 +74,7 @@ export async function handleRequest(request, env) {
       ok: true,
       service: "blip-license-worker",
       product: env.PRODUCT_NAME || "Blip",
-      min_amount_rub: Number(env.MIN_AMOUNT_RUB || 10),
+      min_amount_rub: Number(env.MIN_AMOUNT_RUB || 300),
     });
   }
 
@@ -94,7 +94,7 @@ export async function handleRequest(request, env) {
       return json({ ok: false, error: "wallet_not_configured" }, 500);
     }
 
-    const amountRub = Number(env.MIN_AMOUNT_RUB || 10);
+    const amountRub = Number(env.MIN_AMOUNT_RUB || 300);
     const orderId = randomOrderId();
     const record = {
       order_id: orderId,
@@ -157,7 +157,7 @@ export async function handleRequest(request, env) {
       return json({ ok: false, error: "payment_held_or_unaccepted" }, 400);
     }
 
-    const minAmount = Number(env.MIN_AMOUNT_RUB || 10);
+    const minAmount = Number(env.MIN_AMOUNT_RUB || 300);
     const paidAmount = Number(withdrawAmount || amount || 0);
     if (!Number.isFinite(paidAmount) || paidAmount + 0.01 < minAmount) {
       return json({ ok: false, error: "insufficient_amount" }, 400);

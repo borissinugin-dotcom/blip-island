@@ -26,7 +26,7 @@ async function makeEnv() {
       YOOMONEY_SECRET: "test_yoomoney_secret",
       ED25519_PRIVATE_JWK: JSON.stringify(privJwk),
       ADMIN_TOKEN: "adm_secret_123",
-      MIN_AMOUNT_RUB: "10",
+      MIN_AMOUNT_RUB: "300",
       PRODUCT_NAME: "Blip",
     },
     pubKey: kp.publicKey,
@@ -69,7 +69,7 @@ test("order create -> YooMoney webhook -> Ed25519 verified license", async () =>
       body: new URLSearchParams({
         notification_type: "p2p-incoming",
         operation_id: "op1",
-        amount: "10.00",
+        amount: "300.00",
         currency: "643",
         datetime: "2026-11-15T05:00:00Z",
         sender: "41001111",
@@ -86,8 +86,8 @@ test("order create -> YooMoney webhook -> Ed25519 verified license", async () =>
   const fields = {
     notification_type: "p2p-incoming",
     operation_id: "op_valid_1",
-    amount: "10.00",
-    withdraw_amount: "10.00",
+    amount: "300.00",
+    withdraw_amount: "300.00",
     currency: "643",
     datetime: "2026-11-15T05:00:00Z",
     sender: "41001111",
