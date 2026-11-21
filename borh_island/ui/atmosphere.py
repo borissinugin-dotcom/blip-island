@@ -2751,7 +2751,7 @@ class AtmosphericScenePainter:
         buf_y0 = y0 - 18.0
         buf_w = max(80.0, buf_x1 - buf_x0)
         buf_h = max(60.0, min(h * 0.62, 230.0) + 36.0)
-        buf_scale = 0.30
+        buf_scale = 0.18 + 0.10 * max(0.25, min(1.0, float(quality)))
         iw = max(16, int(math.ceil(buf_w * buf_scale)))
         ih = max(16, int(math.ceil(buf_h * buf_scale)))
 
@@ -2765,7 +2765,7 @@ class AtmosphericScenePainter:
             and sim._buf_img.width() == iw
             and sim._buf_img.height() == ih
             and sim._buf_key == buf_key
-            and (now_b - sim._buf_ts) < 0.032
+            and (now_b - sim._buf_ts) < 0.065
         ):
             buf_target = sim._buf_img
             smoke_loci = sim._buf_loci
@@ -2781,8 +2781,7 @@ class AtmosphericScenePainter:
             buf_target.fill(0)
 
             bp = QPainter(buf_target)
-            # Bilinear sampling inside smoke buffer eliminates sub-pixel nearest-neighbor texel shimmer
-            bp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            # Outer drawImage already applies bilinear smoothing; skip inner SmoothPixmapTransform on weak GPUs/CPUs
             rx_k = buf_scale * 1.18
             ry_k = buf_scale * 1.32
             op_base = base_opacity * 0.74

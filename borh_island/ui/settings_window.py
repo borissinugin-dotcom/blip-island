@@ -9,6 +9,7 @@ from pathlib import Path
 from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QGuiApplication, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -550,6 +551,19 @@ class SettingsWindow(QDialog):
         reset_btn.setIcon(get_icon("refresh", 14, "#F2F5FA", "#60A5FA"))
         reset_btn.clicked.connect(self._reset_atmo_to_auto)
         ac_lay.addWidget(reset_btn)
+
+        from ..core.licensing import APP_VERSION
+
+        upd_row = QHBoxLayout()
+        upd_row.setSpacing(8)
+        self.upd_status_lbl = QLabel(f"Версия: v{APP_VERSION}" if cfg.language == "ru" else f"Version: v{APP_VERSION}")
+        self.upd_status_lbl.setStyleSheet("font-size: 12px; color: #94A3B8;")
+        self.upd_check_btn = QPushButton("Проверить обновления (GitHub)" if cfg.language == "ru" else "Check for Updates (GitHub)")
+        self.upd_check_btn.setIcon(get_icon("refresh", 14, "#F2F5FA", "#60A5FA"))
+        self.upd_check_btn.clicked.connect(self._check_github_updates)
+        upd_row.addWidget(self.upd_status_lbl, 1)
+        upd_row.addWidget(self.upd_check_btn)
+        ac_lay.addLayout(upd_row)
         v.addWidget(atmo_card)
 
         # Dev Tools (QR, URL, Base64, JSON) hidden from main island UI by default
@@ -652,6 +666,27 @@ class SettingsWindow(QDialog):
                 cb.setCurrentIndex(idx)
             cb.blockSignals(False)
         self._apply_atmosphere_live()
+
+    def _check_github_updates(self) -> None:
+        from ..services.updater_service import check_github_updates, download_and_stage_update
+
+        self.upd_check_btn.setEnabled(False)
+        self.upd_status_lbl.setText("Проверяю GitHub...")
+        QApplication.processEvents()
+        info = check_github_updates()
+        self.upd_check_btn.setEnabled(True)
+        if info.error:
+            self.upd_status_lbl.setText(f"Ошибка: {info.error[:48]}")
+            return
+        if not info.available:
+            self.upd_status_lbl.setText(f"Установлена актуальная версия v{info.current_version}")
+            return
+        self.upd_status_lbl.setText(f"Доступна v{info.latest_version} — скачиваю...")
+        QApplication.processEvents()
+        ok, msg = download_and_stage_update(info)
+        self.upd_status_lbl.setText(msg[:64])
+        if ok and getattr(sys, "frozen", False):
+            QTimer.singleShot(500, QApplication.quit)
 
     def _run_settings_text_tool(self, fn) -> None:
         src = self.settings_tool_in.toPlainText()

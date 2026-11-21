@@ -139,12 +139,12 @@ def _get_refraction_tier(quality: str) -> tuple[float, bool, bool]:
     """Return (bg_scale, use_bilinear, use_dispersion) for refraction quality: low | medium | high | ultra."""
     q = str(quality or "ultra").lower()
     if q == "low":
-        return 0.44, False, False
+        return 0.40, False, False
     if q == "medium":
-        return 0.52, False, True
+        return 0.46, False, True
     if q == "high":
-        return 0.56, True, False
-    return 0.66, True, True  # ultra (exact current quality)
+        return 0.50, True, False
+    return 0.54, True, True  # ultra (optimized for weak PCs/laptops)
 
 
 def render_3d_refraction_card(

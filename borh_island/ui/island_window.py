@@ -4054,7 +4054,7 @@ class IslandWindow(QWidget):
                     painter.fillRect(canvas_rect, sg)
 
             if use_glass:
-                dpr = min(1.35, max(1.0, float(self.devicePixelRatioF())))
+                dpr = min(1.25, max(1.0, float(self.devicePixelRatioF())))
                 pw = max(1, int(round(self.width() * dpr)))
                 ph = max(1, int(round(self.height() * dpr)))
 
