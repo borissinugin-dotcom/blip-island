@@ -8,11 +8,11 @@
       "updated_at": 1795353565
     },
     "50243267e7da36155d2e8dec6565132c4eab2c6bfbe37ef55b52d32dc92b32b3": {
-      "mode": "forced_free",
+      "mode": "active",
       "block_payment": true,
       "blocked_features": [],
       "label": "50243267e7da",
-      "updated_at": 1795353556
+      "updated_at": 1795353632
     }
   }
 }
