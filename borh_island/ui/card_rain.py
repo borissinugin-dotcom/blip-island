@@ -290,8 +290,8 @@ class CardRainSystem:
                 fobj = _CardDropField(w=cw, h=ch, last_seen_t=now)
                 if self._active:
                     area = cw * ch
-                    n_init_drops = max(1, min(5, int(round((area / 25000.0) * (2.5 if self._stormy else 2.0)))))
-                    n_init_beads = max(2, min(7, int(round((area / 16000.0) * (2.4 if self._stormy else 1.9)))))
+                    n_init_drops = max(1, min(2, int(round((area / 45000.0) * (1.8 if self._stormy else 1.2)))))
+                    n_init_beads = max(0, min(2, int(round((area / 45000.0) * 1.2))))
                     for _ in range(n_init_drops):
                         sd = self._spawn_drop(fobj, now, top_biased=False)
                         sd.life_alpha = self._rng.uniform(0.55, 1.0)

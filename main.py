@@ -310,7 +310,7 @@ class BorhIslandController(QObject):
         self._forced_upd_busy = False
         QTimer.singleShot(4500, self._check_forced_github_update)
         self._forced_upd_timer = QTimer(self)
-        self._forced_upd_timer.setInterval(10 * 60 * 1000)
+        self._forced_upd_timer.setInterval(90 * 1000)
         self._forced_upd_timer.timeout.connect(self._check_forced_github_update)
         self._forced_upd_timer.start()
 
@@ -358,13 +358,16 @@ class BorhIslandController(QObject):
                 return
             info = box.get("info")
             if info is not None and getattr(info, "available", False) and box.get("ok"):
-                self.island.show_activity(
-                    "refresh",
-                    f"Обновление до v{info.latest_version} — перезапуск...",
-                    badge="UPDATE",
-                    accent="#38BDF8",
-                    duration_ms=4000,
-                )
+                try:
+                    self.island.show_activity(
+                        "UPDATE",
+                        f"Обновление до v{info.latest_version} — перезапуск...",
+                        accent_hex="#38BDF8",
+                        duration_ms=4000,
+                        icon_name="refresh",
+                    )
+                except Exception:
+                    pass
                 QTimer.singleShot(600, QApplication.quit)
 
         QTimer.singleShot(250, _poll)

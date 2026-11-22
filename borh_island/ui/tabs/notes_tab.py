@@ -1,580 +1,493 @@
-"""Notes, Timer, and Natural-Language Reminders tab."""
+"""Clock, Stopwatch, and 3-column Drum Timer tab (adapted from phone Clock UI)."""
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QPushButton,
-    QSplitter,
-    QTextEdit,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from ...core.i18n import tr
-from ...core.storage import LocalStorage, NoteItem, ReminderItem
-from ...services.reminder_parser import next_occurrence, parse_duration_seconds, parse_reminder_phrase
-from ..icons import get_icon, get_pixmap
+from ...core.storage import LocalStorage
+from ...services.reminder_parser import parse_duration_seconds
+from ..icons import get_icon
+
+_RU_MONTHS = (
+    "янв.", "февр.", "мар.", "апр.", "мая", "июн.",
+    "июл.", "авг.", "сент.", "окт.", "нояб.", "дек.",
+)
+
+
+class _AnalogClockWidget(QWidget):
+    """Crisp circular analog clock face matching the phone World Clock reference."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(176, 176)
+        self.setMaximumSize(220, 220)
+        self._accent = QColor("#3B82F6")
+        self._fg = QColor("#F8FAFC")
+        self._muted = QColor("#94A3B8")
+        self._bg = QColor(255, 255, 255, 14)
+
+    def set_colors(self, accent_hex: str, fg_hex: str = "#F8FAFC") -> None:
+        self._accent = QColor(accent_hex)
+        self._fg = QColor(fg_hex)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        sz = min(self.width(), self.height()) - 10.0
+        cx = self.width() * 0.5
+        cy = self.height() * 0.5
+        r = sz * 0.5
+
+        # Subtle dial face
+        p.setPen(QPen(QColor(255, 255, 255, 28), 1.4))
+        p.setBrush(self._bg)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+
+        # 60 minute/hour tick marks
+        for m in range(60):
+            ang = math.radians(m * 6.0 - 90.0)
+            is_hr = (m % 5 == 0)
+            r_out = r - 4.0
+            r_in = r - (11.0 if is_hr else 7.0)
+            p.setPen(QPen(QColor(255, 255, 255, 190 if is_hr else 70), 1.6 if is_hr else 1.0))
+            p.drawLine(
+                QPointF(cx + math.cos(ang) * r_in, cy + math.sin(ang) * r_in),
+                QPointF(cx + math.cos(ang) * r_out, cy + math.sin(ang) * r_out),
+            )
+
+        # 1..12 numerals
+        p.setPen(self._fg)
+        p.setFont(QFont("Segoe UI", max(8, int(round(r * 0.145))), QFont.Weight.DemiBold))
+        r_num = r - 22.0
+        for h_num in range(1, 13):
+            ang = math.radians(h_num * 30.0 - 90.0)
+            nx = cx + math.cos(ang) * r_num
+            ny = cy + math.sin(ang) * r_num
+            p.drawText(QRectF(nx - 14.0, ny - 10.0, 28.0, 20.0), Qt.AlignmentFlag.AlignCenter, str(h_num))
+
+        now = datetime.now()
+        sec = now.second + now.microsecond / 1_000_000.0
+        minute = now.minute + sec / 60.0
+        hour = (now.hour % 12) + minute / 60.0
+
+        # Hour hand
+        h_ang = math.radians(hour * 30.0 - 90.0)
+        p.setPen(QPen(self._fg, 3.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(cx, cy), QPointF(cx + math.cos(h_ang) * r * 0.50, cy + math.sin(h_ang) * r * 0.50))
+
+        # Minute hand
+        m_ang = math.radians(minute * 6.0 - 90.0)
+        p.setPen(QPen(self._fg, 2.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(cx, cy), QPointF(cx + math.cos(m_ang) * r * 0.72, cy + math.sin(m_ang) * r * 0.72))
+
+        # Blue second hand (matching phone reference)
+        s_ang = math.radians(sec * 6.0 - 90.0)
+        p.setPen(QPen(self._accent, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(
+            QPointF(cx - math.cos(s_ang) * r * 0.14, cy - math.sin(s_ang) * r * 0.14),
+            QPointF(cx + math.cos(s_ang) * r * 0.80, cy + math.sin(s_ang) * r * 0.80),
+        )
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._accent)
+        p.drawEllipse(QPointF(cx, cy), 3.8, 3.8)
+
+
+class _DrumWheelColumn(QWidget):
+    """Scrollable phone-style drum number picker column (prev, active, next)."""
+
+    value_changed = pyqtSignal(int)
+
+    def __init__(self, max_val: int, value: int = 0, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._max = max(1, max_val)
+        self._val = value % (self._max + 1)
+        self.setFixedSize(76, 156)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def value(self) -> int:
+        return self._val
+
+    def set_value(self, v: int) -> None:
+        nv = v % (self._max + 1)
+        if nv != self._val:
+            self._val = nv
+            self.update()
+            self.value_changed.emit(self._val)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta().y()
+        if delta != 0:
+            self.set_value(self._val + (-1 if delta > 0 else 1))
+            event.accept()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            y = event.position().y()
+            if y < self.height() * 0.36:
+                self.set_value(self._val - 1)
+            elif y > self.height() * 0.64:
+                self.set_value(self._val + 1)
+            event.accept()
+
+    def paintEvent(self, event) -> None:
+        del event
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = float(self.width())
+        h = float(self.height())
+        mod = self._max + 1
+
+        rows = (
+            (-2, 0.14, 14, QColor(148, 163, 184, 55)),
+            (-1, 0.30, 20, QColor(148, 163, 184, 155)),
+            (0, 0.50, 32, QColor(248, 250, 252, 255)),
+            (1, 0.70, 20, QColor(148, 163, 184, 155)),
+            (2, 0.86, 14, QColor(148, 163, 184, 55)),
+        )
+        for off, y_frac, pt_sz, col in rows:
+            num = (self._val + off) % mod
+            p.setPen(col)
+            p.setFont(QFont("Segoe UI", pt_sz, QFont.Weight.DemiBold if off == 0 else QFont.Weight.Normal))
+            cy = h * y_frac
+            p.drawText(QRectF(0.0, cy - 20.0, w, 40.0), Qt.AlignmentFlag.AlignCenter, f"{num:02d}")
 
 
 class NotesTab(QWidget):
-    """Auto-saved folders rich-text notes + task checkboxes + countdown timer + scheduled reminders."""
+    """Phone-style Clock tab: World Clock, Stopwatch, and 3-column Drum Timer (keeps NotesTab API for main.py)."""
 
     timer_updated = pyqtSignal(int, bool, str)  # (remaining_seconds, running, label)
     timer_finished = pyqtSignal(str)
-    reminder_triggered = pyqtSignal(object)  # ReminderItem
+    reminder_triggered = pyqtSignal(object)
 
     def __init__(self, storage: LocalStorage, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.storage = storage
-        self._current_note: NoteItem | None = None
-        self._notes_map: dict[int, NoteItem] = {}
-        self._rem_map: dict[int, ReminderItem] = {}
+        self._accent_hex = "#3B82F6"
+        self._icon_fg = "#F8FAFC"
 
-        self._timer_total = 0
-        self._timer_remaining = 0
+        self._timer_total = 300
+        self._timer_remaining = 300
         self._timer_running = False
         self._timer_label = tr("timer")
 
+        self._sw_running = False
+        self._sw_elapsed_ms = 0
+        self._sw_last_ts = 0.0
+
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 4, 6, 6)
+        root.setContentsMargins(10, 6, 10, 8)
         root.setSpacing(8)
 
-        big_pill_qss = (
-            "QPushButton { min-height: 36px; max-height: 36px; border-radius: 18px; "
-            "padding: 0px 16px; font-size: 12px; font-weight: 600; }"
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack, 1)
+
+        # ---- Page 0: World Clock (Мировые часы) ----
+        pg_clock = QWidget()
+        cl_lay = QVBoxLayout(pg_clock)
+        cl_lay.setContentsMargins(0, 2, 0, 2)
+        cl_lay.setSpacing(6)
+        cl_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._analog_clock = _AnalogClockWidget()
+        self._digital_lbl = QLabel("00:00:00")
+        self._digital_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._digital_lbl.setStyleSheet("font-size: 26px; font-weight: 600; color: #F8FAFC; background: transparent;")
+        self._local_date_lbl = QLabel("")
+        self._local_date_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._local_date_lbl.setStyleSheet("font-size: 12px; color: #94A3B8; background: transparent;")
+        cl_lay.addWidget(self._analog_clock, 0, Qt.AlignmentFlag.AlignCenter)
+        cl_lay.addWidget(self._digital_lbl)
+        cl_lay.addWidget(self._local_date_lbl)
+        self.stack.addWidget(pg_clock)
+
+        # ---- Page 1: Stopwatch (Секундомер) ----
+        pg_sw = QWidget()
+        sw_lay = QVBoxLayout(pg_sw)
+        sw_lay.setContentsMargins(0, 8, 0, 8)
+        sw_lay.setSpacing(18)
+        sw_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._sw_lbl = QLabel("00:00.00")
+        self._sw_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sw_lbl.setStyleSheet("font-size: 42px; font-weight: 500; color: #F8FAFC; background: transparent;")
+        sw_btn_row = QHBoxLayout()
+        sw_btn_row.setSpacing(12)
+        sw_btn_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sw_play_btn = QPushButton("▶")
+        self._sw_play_btn.setFixedSize(96, 42)
+        self._sw_play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sw_play_btn.clicked.connect(self._toggle_stopwatch)
+        self._sw_reset_btn = QPushButton("↺")
+        self._sw_reset_btn.setFixedSize(48, 42)
+        self._sw_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sw_reset_btn.clicked.connect(self._reset_stopwatch)
+        sw_btn_row.addWidget(self._sw_play_btn)
+        sw_btn_row.addWidget(self._sw_reset_btn)
+        sw_lay.addWidget(self._sw_lbl)
+        sw_lay.addLayout(sw_btn_row)
+        self.stack.addWidget(pg_sw)
+
+        # ---- Page 2: 3-column Drum Timer (Таймер) ----
+        pg_tm = QWidget()
+        tm_lay = QVBoxLayout(pg_tm)
+        tm_lay.setContentsMargins(0, 4, 0, 4)
+        tm_lay.setSpacing(10)
+        tm_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        drum_row = QHBoxLayout()
+        drum_row.setSpacing(6)
+        drum_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._col_h = _DrumWheelColumn(23, 0)
+        self._col_m = _DrumWheelColumn(59, 5)
+        self._col_s = _DrumWheelColumn(59, 0)
+        for col_w in (self._col_h, self._col_m, self._col_s):
+            col_w.value_changed.connect(self._on_drum_changed)
+        sep1 = QLabel(":")
+        sep2 = QLabel(":")
+        for sp in (sep1, sep2):
+            sp.setStyleSheet("font-size: 28px; font-weight: 700; color: #F8FAFC; background: transparent;")
+            sp.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drum_row.addWidget(self._col_h)
+        drum_row.addWidget(sep1)
+        drum_row.addWidget(self._col_m)
+        drum_row.addWidget(sep2)
+        drum_row.addWidget(self._col_s)
+        tm_lay.addLayout(drum_row)
+
+        tm_btn_row = QHBoxLayout()
+        tm_btn_row.setSpacing(12)
+        tm_btn_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.timer_start_btn = QPushButton("▶")
+        self.timer_start_btn.setFixedSize(96, 42)
+        self.timer_start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.timer_start_btn.clicked.connect(self._toggle_timer)
+        self.timer_reset_btn = QPushButton("↺")
+        self.timer_reset_btn.setFixedSize(48, 42)
+        self.timer_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.timer_reset_btn.clicked.connect(self._reset_timer)
+        tm_btn_row.addWidget(self.timer_start_btn)
+        tm_btn_row.addWidget(self.timer_reset_btn)
+        tm_lay.addLayout(tm_btn_row)
+        self.stack.addWidget(pg_tm)
+
+        # ---- Bottom Phone-style Segmented Pill Bar ----
+        nav_frame = QFrame()
+        nav_frame.setObjectName("ClockNavBar")
+        nav_frame.setStyleSheet(
+            "QFrame#ClockNavBar { background: rgba(255, 255, 255, 0.08); "
+            "border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 22px; }"
         )
-        big_primary_qss = (
-            "QPushButton { min-height: 36px; max-height: 36px; min-width: 92px; border-radius: 18px; "
-            "padding: 0px 18px; font-size: 12px; font-weight: 700; }"
+        nav_lay = QHBoxLayout(nav_frame)
+        nav_lay.setContentsMargins(5, 4, 5, 4)
+        nav_lay.setSpacing(4)
+
+        self.btn_mode_clock = QPushButton("Мировые часы")
+        self.btn_mode_sw = QPushButton("Секундомер")
+        self.btn_mode_timer = QPushButton("Таймер")
+        # Compatibility aliases for tests
+        self.btn_mode_notes = self.btn_mode_clock
+        self.btn_mode_rem = self.btn_mode_sw
+
+        for idx, b in enumerate((self.btn_mode_clock, self.btn_mode_sw, self.btn_mode_timer)):
+            b.setCheckable(True)
+            b.setMinimumHeight(36)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, i=idx: self._switch_mode(i))
+            nav_lay.addWidget(b, 1)
+
+        root.addWidget(nav_frame)
+
+        # Timers
+        self._ui_tick = QTimer(self)
+        self._ui_tick.setInterval(45)
+        self._ui_tick.timeout.connect(self._on_ui_tick)
+        self._ui_tick.start()
+
+        self._countdown_tick = QTimer(self)
+        self._countdown_tick.setInterval(1000)
+        self._countdown_tick.timeout.connect(self._on_countdown_tick)
+
+        self._switch_mode(0)
+        self.apply_palette(None)
+        self._refresh_clock_labels()
+
+    def _switch_mode(self, idx: int) -> None:
+        self.stack.setCurrentIndex(idx)
+        for i, b in enumerate((self.btn_mode_clock, self.btn_mode_sw, self.btn_mode_timer)):
+            b.setChecked(i == idx)
+        self._style_buttons()
+
+    def _style_buttons(self) -> None:
+        pill_play = (
+            f"QPushButton {{ background: rgba(255,255,255,0.14); color: {self._accent_hex}; "
+            f"border: 1px solid rgba(255,255,255,0.22); border-radius: 21px; font-size: 16px; font-weight: 700; }}"
+            f"QPushButton:hover {{ background: rgba(255,255,255,0.22); }}"
         )
-        fmt_pill_qss = (
-            "QPushButton { min-height: 34px; max-height: 34px; border-radius: 17px; "
-            "padding: 0px 14px; font-size: 12px; font-weight: 600; }"
+        pill_reset = (
+            "QPushButton { background: rgba(255,255,255,0.07); color: #CBD5E1; "
+            "border: 1px solid rgba(255,255,255,0.14); border-radius: 21px; font-size: 16px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.14); }"
         )
+        self._sw_play_btn.setStyleSheet(pill_play)
+        self._sw_reset_btn.setStyleSheet(pill_reset)
+        self.timer_start_btn.setStyleSheet(pill_play)
+        self.timer_reset_btn.setStyleSheet(pill_reset)
 
-        # --- Sub-switcher: Notes vs Timer & Reminders (Large Pill Tabs) ---
-        sw_row = QHBoxLayout()
-        sw_row.setSpacing(8)
-        self.btn_mode_notes = QPushButton(tr("tab_notes"))
-        self.btn_mode_notes.setIcon(get_icon("notes", 16, "#F2F5FA", "#60A5FA"))
-        self.btn_mode_notes.setIconSize(self.btn_mode_notes.iconSize().__class__(16, 16))
-        self.btn_mode_notes.setCheckable(True)
-        self.btn_mode_notes.setChecked(True)
-        self.btn_mode_notes.setFixedHeight(38)
-        self.btn_mode_notes.setStyleSheet(
-            "QPushButton { min-height: 36px; max-height: 36px; border-radius: 19px; "
-            "padding: 0px 18px; font-size: 12px; font-weight: 600; }"
+        nav_qss = (
+            "QPushButton { min-height: 36px; border-radius: 18px; background: transparent; "
+            "color: #94A3B8; font-size: 11px; font-weight: 600; border: none; padding: 0px 8px; }"
+            "QPushButton:hover { color: #F8FAFC; }"
+            "QPushButton:checked { background: rgba(255, 255, 255, 0.16); color: #FFFFFF; }"
         )
-        self.btn_mode_rem = QPushButton(f"{tr('timer')} · {tr('reminders')}")
-        self.btn_mode_rem.setIcon(get_icon("timer", 16, "#F2F5FA", "#60A5FA"))
-        self.btn_mode_rem.setIconSize(self.btn_mode_rem.iconSize().__class__(16, 16))
-        self.btn_mode_rem.setCheckable(True)
-        self.btn_mode_rem.setFixedHeight(38)
-        self.btn_mode_rem.setStyleSheet(
-            "QPushButton { min-height: 36px; max-height: 36px; border-radius: 19px; "
-            "padding: 0px 18px; font-size: 12px; font-weight: 600; }"
-        )
-        self.btn_mode_notes.clicked.connect(lambda: self._switch_view(0))
-        self.btn_mode_rem.clicked.connect(lambda: self._switch_view(1))
-        sw_row.addWidget(self.btn_mode_notes, 1)
-        sw_row.addWidget(self.btn_mode_rem, 1)
-        root.addLayout(sw_row)
+        for b in (self.btn_mode_clock, self.btn_mode_sw, self.btn_mode_timer):
+            b.setStyleSheet(nav_qss)
 
-        # --- View 0: Notes (Atoll Card Layout with Large Controls) ---
-        self.notes_host = QWidget()
-        nh = QVBoxLayout(self.notes_host)
-        nh.setContentsMargins(0, 0, 0, 0)
-        nh.setSpacing(8)
+    def apply_palette(self, pal) -> None:
+        if pal is not None:
+            self._accent_hex = getattr(pal, "accent", "#3B82F6")
+            self._icon_fg = getattr(pal, "text_primary", "#F8FAFC")
+        self._analog_clock.set_colors(self._accent_hex, self._icon_fg)
+        self._style_buttons()
 
-        bar_card = QFrame()
-        bar_card.setObjectName("Card")
-        bar = QHBoxLayout(bar_card)
-        bar.setContentsMargins(10, 8, 10, 8)
-        bar.setSpacing(8)
-        self.folder_combo = QComboBox()
-        self.folder_combo.setFixedHeight(36)
-        self.folder_combo.currentIndexChanged.connect(self._reload_notes)
-        new_note_btn = QPushButton("  Новая заметка")
-        new_note_btn.setObjectName("Primary")
-        new_note_btn.setIcon(get_icon("plus", 15, "#0B0D13", "#0B0D13"))
-        new_note_btn.setFixedHeight(36)
-        new_note_btn.setStyleSheet(big_primary_qss)
-        new_note_btn.clicked.connect(self._new_note)
-        del_note_btn = QPushButton("")
-        del_note_btn.setIcon(get_icon("trash", 16, "#F8FAFC", "#F87171"))
-        del_note_btn.setToolTip("Удалить заметку")
-        del_note_btn.setFixedSize(36, 36)
-        del_note_btn.setStyleSheet(
-            "QPushButton { min-width: 34px; max-width: 34px; min-height: 34px; max-height: 34px; "
-            "padding: 0px; border-radius: 18px; }"
-        )
-        del_note_btn.clicked.connect(self._delete_current_note)
-        bar.addWidget(self.folder_combo, 1)
-        bar.addWidget(new_note_btn)
-        bar.addWidget(del_note_btn)
-        nh.addWidget(bar_card)
+    def retranslate_ui(self) -> None:
+        ru = True
+        self.btn_mode_clock.setText("Мировые часы" if ru else "World Clock")
+        self.btn_mode_sw.setText("Секундомер" if ru else "Stopwatch")
+        self.btn_mode_timer.setText("Таймер" if ru else "Timer")
 
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setHandleWidth(8)
+    def _refresh_clock_labels(self) -> None:
+        now = datetime.now()
+        self._digital_lbl.setText(now.strftime("%H:%M:%S"))
+        mon = _RU_MONTHS[now.month - 1]
+        self._local_date_lbl.setText(f"Местное время  {now.day} {mon}")
 
-        list_card = QFrame()
-        list_card.setObjectName("Card")
-        list_card.setMinimumWidth(165)
-        list_card.setMaximumWidth(215)
-        lc_lay = QVBoxLayout(list_card)
-        lc_lay.setContentsMargins(8, 8, 8, 8)
-        lc_lay.setSpacing(6)
-        list_hdr = QLabel("Список")
-        list_hdr.setObjectName("Heading")
-        lc_lay.addWidget(list_hdr)
-        self.note_list = QListWidget()
-        self.note_list.setStyleSheet("background: transparent; border: none;")
-        self.note_list.currentItemChanged.connect(self._on_note_selected)
-        lc_lay.addWidget(self.note_list, 1)
+    def _on_ui_tick(self) -> None:
+        idx = self.stack.currentIndex()
+        if idx == 0 and self.isVisible():
+            self._analog_clock.update()
+            self._refresh_clock_labels()
+        if self._sw_running:
+            now_m = time.monotonic()
+            self._sw_elapsed_ms += int(round((now_m - self._sw_last_ts) * 1000.0))
+            self._sw_last_ts = now_m
+            tot_cs = self._sw_elapsed_ms // 10
+            cs = tot_cs % 100
+            sec = (tot_cs // 100) % 60
+            mins = (tot_cs // 6000) % 60
+            hrs = tot_cs // 360000
+            if hrs > 0:
+                self._sw_lbl.setText(f"{hrs:02d}:{mins:02d}:{sec:02d}.{cs:02d}")
+            else:
+                self._sw_lbl.setText(f"{mins:02d}:{sec:02d}.{cs:02d}")
 
-        ed_card = QFrame()
-        ed_card.setObjectName("Card")
-        ev = QVBoxLayout(ed_card)
-        ev.setContentsMargins(10, 10, 10, 10)
-        ev.setSpacing(8)
-
-        self.title_edit = QLineEdit()
-        self.title_edit.setFixedHeight(36)
-        self.title_edit.setPlaceholderText("Заголовок заметки...")
-        self.title_edit.setStyleSheet("font-size: 13px; font-weight: 600; border-radius: 14px; padding: 0px 12px;")
-        self.title_edit.textEdited.connect(self._schedule_autosave)
-        ev.addWidget(self.title_edit)
-
-        fmt_row = QHBoxLayout()
-        fmt_row.setSpacing(6)
-        b_btn = QPushButton("B")
-        b_btn.setFixedSize(34, 34)
-        b_btn.setStyleSheet(
-            "QPushButton { min-width: 32px; max-width: 32px; min-height: 32px; max-height: 32px; "
-            "padding: 0px; border-radius: 17px; font-weight: 700; font-size: 13px; }"
-        )
-        b_btn.clicked.connect(self._toggle_bold)
-        i_btn = QPushButton("I")
-        i_btn.setFixedSize(34, 34)
-        i_btn.setStyleSheet(
-            "QPushButton { min-width: 32px; max-width: 32px; min-height: 32px; max-height: 32px; "
-            "padding: 0px; border-radius: 17px; font-style: italic; font-size: 13px; }"
-        )
-        i_btn.clicked.connect(self._toggle_italic)
-        chk_btn = QPushButton(" Задача")
-        chk_btn.setIcon(get_icon("plus", 14, "#F2F5FA", "#60A5FA"))
-        chk_btn.setFixedHeight(34)
-        chk_btn.setStyleSheet(fmt_pill_qss)
-        chk_btn.clicked.connect(self._insert_checkbox)
-        tog_btn = QPushButton(" Чекбокс")
-        tog_btn.setIcon(get_icon("swap", 14, "#F2F5FA", "#60A5FA"))
-        tog_btn.setFixedHeight(34)
-        tog_btn.setStyleSheet(fmt_pill_qss)
-        tog_btn.clicked.connect(self._toggle_line_checkbox)
-        self.save_lbl = QLabel("Сохранено")
-        self.save_lbl.setObjectName("Muted")
-        fmt_row.addWidget(b_btn)
-        fmt_row.addWidget(i_btn)
-        fmt_row.addWidget(chk_btn)
-        fmt_row.addWidget(tog_btn)
-        fmt_row.addStretch(1)
-        fmt_row.addWidget(self.save_lbl)
-        ev.addLayout(fmt_row)
-
-        self.editor = QTextEdit()
-        self.editor.setStyleSheet("border-radius: 14px; padding: 8px; font-size: 13px;")
-        self.editor.textChanged.connect(self._schedule_autosave)
-        ev.addWidget(self.editor, 1)
-
-        split.addWidget(list_card)
-        split.addWidget(ed_card)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        nh.addWidget(split, 1)
-        root.addWidget(self.notes_host, 1)
-
-        # --- View 1: Timer + Reminders (Large Pill Controls) ---
-        self.rem_host = QWidget()
-        rv = QVBoxLayout(self.rem_host)
-        rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(8)
-
-        timer_card = QFrame()
-        timer_card.setObjectName("Card")
-        tc = QVBoxLayout(timer_card)
-        tc.setContentsMargins(12, 10, 12, 10)
-        tc.setSpacing(8)
-
-        th = QHBoxLayout()
-        th.setSpacing(8)
-        t_ico = QLabel()
-        t_ico.setPixmap(get_pixmap("timer", 18, "#F2F5FA", "#60A5FA"))
-        t_lbl = QLabel(tr("timer"))
-        t_lbl.setObjectName("Heading")
-        self.timer_display = QLabel("00:00")
-        self.timer_display.setStyleSheet("font-size: 24px; font-weight: 700;")
-        th.addWidget(t_ico)
-        th.addWidget(t_lbl)
-        th.addStretch(1)
-        th.addWidget(self.timer_display)
-        tc.addLayout(th)
-
-        presets = QHBoxLayout()
-        presets.setSpacing(8)
-        for mins in (5, 10, 25, 45):
-            pb = QPushButton(f"{mins} мин")
-            pb.setFixedHeight(36)
-            pb.setStyleSheet(big_pill_qss)
-            pb.clicked.connect(lambda _, m=mins: self.start_timer(m * 60, f"{m}m Timer"))
-            presets.addWidget(pb)
-        tc.addLayout(presets)
-
-        t_custom = QHBoxLayout()
-        t_custom.setSpacing(8)
-        self.timer_input = QLineEdit()
-        self.timer_input.setFixedHeight(36)
-        self.timer_input.setPlaceholderText("15m / 1h 30m / 90s")
-        self.timer_input.setStyleSheet("border-radius: 14px; padding: 0px 12px; font-size: 12px;")
-        self.timer_start_btn = QPushButton(tr("start"))
-        self.timer_start_btn.setObjectName("Primary")
-        self.timer_start_btn.setFixedHeight(36)
-        self.timer_start_btn.setStyleSheet(big_primary_qss)
-        from PyQt6.QtCore import QSize
-        from ...core.licensing import get_license_manager
-        if not get_license_manager().is_feature_allowed("timer"):
-            self.timer_start_btn.setIcon(get_icon("lock", size=14, color="#fbbf24"))
-            self.timer_start_btn.setIconSize(QSize(14, 14))
-        self.timer_start_btn.clicked.connect(self._on_timer_start_pause)
-        t_reset = QPushButton(tr("reset"))
-        t_reset.setFixedHeight(36)
-        t_reset.setStyleSheet(big_pill_qss)
-        t_reset.clicked.connect(self.reset_timer)
-        t_custom.addWidget(self.timer_input, 1)
-        t_custom.addWidget(self.timer_start_btn)
-        t_custom.addWidget(t_reset)
-        tc.addLayout(t_custom)
-        rv.addWidget(timer_card)
-
-        rem_card = QFrame()
-        rem_card.setObjectName("Card")
-        rc = QVBoxLayout(rem_card)
-        rc.setContentsMargins(12, 10, 12, 10)
-        rc.setSpacing(8)
-
-        rh = QHBoxLayout()
-        rh.setSpacing(8)
-        r_ico = QLabel()
-        r_ico.setPixmap(get_pixmap("bell", 18, "#F2F5FA", "#F59E0B"))
-        rlbl = QLabel(tr("reminders"))
-        rlbl.setObjectName("Heading")
-        rh.addWidget(r_ico)
-        rh.addWidget(rlbl, 1)
-        rc.addLayout(rh)
-
-        r_in = QHBoxLayout()
-        r_in.setSpacing(8)
-        self.rem_edit = QLineEdit()
-        self.rem_edit.setFixedHeight(36)
-        self.rem_edit.setPlaceholderText(tr("reminder_placeholder"))
-        self.rem_edit.setStyleSheet("border-radius: 14px; padding: 0px 12px; font-size: 12px;")
-        self.rem_edit.returnPressed.connect(self._add_reminder_from_input)
-        r_add = QPushButton(tr("add"))
-        r_add.setObjectName("Primary")
-        r_add.setFixedHeight(36)
-        r_add.setStyleSheet(big_primary_qss)
-        r_add.clicked.connect(self._add_reminder_from_input)
-        r_in.addWidget(self.rem_edit, 1)
-        r_in.addWidget(r_add)
-        rc.addLayout(r_in)
-
-        self.rem_list = QListWidget()
-        self.rem_list.itemDoubleClicked.connect(self._delete_selected_reminder)
-        rc.addWidget(self.rem_list, 1)
-        rv.addWidget(rem_card, 1)
-
-        self.rem_host.hide()
-        root.addWidget(self.rem_host, 1)
-
-        # Debounce autosave + 1-second clock tick for timer & reminders
-        self._save_timer = QTimer(self)
-        self._save_timer.setSingleShot(True)
-        self._save_timer.setInterval(450)
-        self._save_timer.timeout.connect(self._flush_save_note)
-
-        self._clock_timer = QTimer(self)
-        self._clock_timer.setInterval(1000)
-        self._clock_timer.timeout.connect(self._on_second_tick)
-        self._clock_timer.start()
-
-        self._reload_folders()
-        self.refresh_reminders()
-
-    def _switch_view(self, idx: int) -> None:
-        self.btn_mode_notes.setChecked(idx == 0)
-        self.btn_mode_rem.setChecked(idx == 1)
-        self.notes_host.setVisible(idx == 0)
-        self.rem_host.setVisible(idx == 1)
-
-    # ------------------------------------------------------------------ Notes
-    def _reload_folders(self) -> None:
-        folders = self.storage.list_note_folders()
-        cur = self.folder_combo.currentText()
-        self.folder_combo.blockSignals(True)
-        self.folder_combo.clear()
-        self.folder_combo.addItem("All", "")
-        for f in folders:
-            self.folder_combo.addItem(f, f)
-        idx = self.folder_combo.findText(cur)
-        self.folder_combo.setCurrentIndex(max(0, idx))
-        self.folder_combo.blockSignals(False)
-        self._reload_notes()
-
-    def _reload_notes(self) -> None:
-        folder = self.folder_combo.currentData() or None
-        notes = self.storage.list_notes(folder)
-        self._notes_map = {n.id: n for n in notes}
-        self.note_list.blockSignals(True)
-        self.note_list.clear()
-        for n in notes:
-            li = QListWidgetItem(f"{n.title or 'Untitled'}\n[{n.folder}]")
-            li.setData(Qt.ItemDataRole.UserRole, n.id)
-            self.note_list.addItem(li)
-        self.note_list.blockSignals(False)
-        if notes:
-            target_id = self._current_note.id if (self._current_note and self._current_note.id in self._notes_map) else notes[0].id
-            for i in range(self.note_list.count()):
-                if self.note_list.item(i).data(Qt.ItemDataRole.UserRole) == target_id:
-                    self.note_list.setCurrentRow(i)
-                    self._load_note_into_editor(self._notes_map[target_id])
-                    break
+    def _toggle_stopwatch(self) -> None:
+        if self._sw_running:
+            self._sw_running = False
+            self._sw_play_btn.setText("▶")
         else:
-            self._current_note = None
-            self.title_edit.clear()
-            self.editor.clear()
+            self._sw_running = True
+            self._sw_last_ts = time.monotonic()
+            self._sw_play_btn.setText("⏸")
 
-    def _on_note_selected(self, cur: QListWidgetItem | None, _prev=None) -> None:
-        if not cur:
-            return
-        self._flush_save_note()
-        nid = cur.data(Qt.ItemDataRole.UserRole)
-        note = self._notes_map.get(nid)
-        if note:
-            self._load_note_into_editor(note)
+    def _reset_stopwatch(self) -> None:
+        self._sw_running = False
+        self._sw_elapsed_ms = 0
+        self._sw_play_btn.setText("▶")
+        self._sw_lbl.setText("00:00.00")
 
-    def _load_note_into_editor(self, note: NoteItem) -> None:
-        self._current_note = note
-        self.title_edit.blockSignals(True)
-        self.editor.blockSignals(True)
-        self.title_edit.setText(note.title)
-        if note.content_html:
-            self.editor.setHtml(note.content_html)
-        else:
-            self.editor.setPlainText(note.content_text)
-        self.title_edit.blockSignals(False)
-        self.editor.blockSignals(False)
-        self.save_lbl.setText("Saved")
+    def _on_drum_changed(self, _v: int = 0) -> None:
+        if not self._timer_running:
+            self._timer_total = self._col_h.value() * 3600 + self._col_m.value() * 60 + self._col_s.value()
+            self._timer_remaining = self._timer_total
 
-    def _schedule_autosave(self) -> None:
-        if self._current_note is None:
-            return
-        self.save_lbl.setText("Saving...")
-        self._save_timer.start()
-
-    def _flush_save_note(self) -> None:
-        if self._current_note is None:
-            return
-        title = self.title_edit.text().strip() or "Untitled"
-        html = self.editor.toHtml()
-        plain = self.editor.toPlainText()
-        self.storage.save_note(self._current_note.id, self._current_note.folder, title, html, plain)
-        self._current_note.title = title
-        self._current_note.content_html = html
-        self._current_note.content_text = plain
-        self.save_lbl.setText("Saved")
-        cur_item = self.note_list.currentItem()
-        if cur_item:
-            cur_item.setText(f"{title}\n[{self._current_note.folder}]")
-
-    def _new_note(self) -> None:
-        folder = self.folder_combo.currentData() or "Задачи"
-        name, ok = QInputDialog.getText(self, "New Note", "Title:", text="New Note")
-        if ok and name.strip():
-            nid = self.storage.save_note(None, folder, name.strip(), "", "")
-            self._reload_folders()
-            if nid in self._notes_map:
-                self._load_note_into_editor(self._notes_map[nid])
-
-    def _delete_current_note(self) -> None:
-        if not self._current_note:
-            return
-        self.storage.delete_note(self._current_note.id)
-        self._current_note = None
-        self._reload_folders()
-
-    def _toggle_bold(self) -> None:
-        fmt = self.editor.currentCharFormat()
-        fmt.setFontWeight(QFont.Weight.Normal if fmt.fontWeight() > QFont.Weight.Normal else QFont.Weight.Bold)
-        self.editor.mergeCurrentCharFormat(fmt)
-
-    def _toggle_italic(self) -> None:
-        fmt = self.editor.currentCharFormat()
-        fmt.setFontItalic(not fmt.fontItalic())
-        self.editor.mergeCurrentCharFormat(fmt)
-
-    def _insert_checkbox(self) -> None:
-        cursor = self.editor.textCursor()
-        cursor.insertText("☐ ")
-
-    def _toggle_line_checkbox(self) -> None:
-        cursor = self.editor.textCursor()
-        cursor.select(QTextCursor.SelectionType.LineUnderCursor)
-        line = cursor.selectedText()
-        if line.startswith("☐"):
-            cursor.insertText("☑" + line[1:])
-        elif line.startswith("☑"):
-            cursor.insertText("☐" + line[1:])
-
-    # ------------------------------------------------------------------ Timer & Reminders
-    def start_timer(self, seconds: int, label: str = "") -> None:
-        from ...core.licensing import get_license_manager
-
-        if not get_license_manager().is_feature_allowed("timer"):
-            from ..pro_dialog import show_pro_upgrade
-
-            show_pro_upgrade(self, reason="Таймер доступен только в Blip PRO.")
-            return
-        self._timer_total = max(1, seconds)
-        self._timer_remaining = self._timer_total
-        self._timer_running = True
-        self._timer_label = label or tr("timer")
-        self.timer_start_btn.setText(tr("pause"))
-        self._update_timer_display()
-        self.timer_updated.emit(self._timer_remaining, True, self._timer_label)
-
-    def reset_timer(self) -> None:
-        self._timer_running = False
-        self._timer_remaining = 0
-        self.timer_start_btn.setText(tr("start"))
-        self._update_timer_display()
-        self.timer_updated.emit(0, False, self._timer_label)
-
-    def _on_timer_start_pause(self) -> None:
-        from ...core.licensing import get_license_manager
-
-        if not self._timer_running and not get_license_manager().is_feature_allowed("timer"):
-            from ..pro_dialog import show_pro_upgrade
-
-            show_pro_upgrade(self, reason="Таймер доступен только в Blip PRO.")
-            return
+    def _toggle_timer(self) -> None:
         if self._timer_running:
             self._timer_running = False
-            self.timer_start_btn.setText(tr("start"))
+            self._countdown_tick.stop()
+            self.timer_start_btn.setText("▶")
             self.timer_updated.emit(self._timer_remaining, False, self._timer_label)
-            return
-        if self._timer_remaining > 0:
+        else:
+            if self._timer_remaining <= 0:
+                self._on_drum_changed()
+            if self._timer_remaining <= 0:
+                return
             self._timer_running = True
-            self.timer_start_btn.setText(tr("pause"))
+            self._countdown_tick.start()
+            self.timer_start_btn.setText("⏸")
             self.timer_updated.emit(self._timer_remaining, True, self._timer_label)
+
+    def _reset_timer(self) -> None:
+        self._timer_running = False
+        self._countdown_tick.stop()
+        self.timer_start_btn.setText("▶")
+        self._col_h.set_value(0)
+        self._col_m.set_value(5)
+        self._col_s.set_value(0)
+        self._timer_total = 300
+        self._timer_remaining = 300
+        self.timer_updated.emit(0, False, self._timer_label)
+
+    def _on_countdown_tick(self) -> None:
+        if not self._timer_running:
             return
-        secs = parse_duration_seconds(self.timer_input.text())
-        if secs:
-            self.start_timer(secs, self.timer_input.text().strip())
+        self._timer_remaining = max(0, self._timer_remaining - 1)
+        self._update_timer_display()
+        self.timer_updated.emit(self._timer_remaining, self._timer_remaining > 0, self._timer_label)
+        if self._timer_remaining <= 0:
+            self._timer_running = False
+            self._countdown_tick.stop()
+            self.timer_start_btn.setText("▶")
+            self.timer_finished.emit(self._timer_label)
 
     def _update_timer_display(self) -> None:
-        s = max(0, self._timer_remaining)
-        h, rem = divmod(s, 3600)
-        m, sec = divmod(rem, 60)
-        self.timer_display.setText(f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}")
+        rem = max(0, int(self._timer_remaining))
+        h = rem // 3600
+        m = (rem % 3600) // 60
+        s = rem % 60
+        for col_w, val in ((self._col_h, h), (self._col_m, m), (self._col_s, s)):
+            col_w.blockSignals(True)
+            col_w.set_value(val)
+            col_w.blockSignals(False)
 
-    def add_reminder_phrase(self, phrase: str) -> bool:
-        parsed = parse_reminder_phrase(phrase)
-        if not parsed:
-            return False
-        self.storage.add_reminder(parsed.title, parsed.due_at.timestamp(), parsed.repeat_rule)
-        self.refresh_reminders()
-        return True
-
-    def _add_reminder_from_input(self) -> None:
-        txt = self.rem_edit.text().strip()
-        if not txt:
-            return
-        if self.add_reminder_phrase(txt):
-            self.rem_edit.clear()
+    # Compatibility methods called by main.py
+    def start_timer(self, seconds: int, label: str = "") -> None:
+        self._timer_total = max(1, int(seconds))
+        self._timer_remaining = self._timer_total
+        self._timer_label = label or tr("timer")
+        self._timer_running = True
+        self._update_timer_display()
+        self._countdown_tick.start()
+        self.timer_start_btn.setText("⏸")
+        self._switch_mode(2)
+        self.timer_updated.emit(self._timer_remaining, True, self._timer_label)
 
     def refresh_reminders(self) -> None:
-        items = self.storage.list_reminders(include_inactive=False)
-        self._rem_map = {r.id: r for r in items}
-        self.rem_list.clear()
-        for r in items:
-            due_s = datetime.fromtimestamp(r.due_at).strftime("%d.%m %H:%M")
-            rep = f" [{r.repeat_days}]" if r.repeat_days and r.repeat_days != "none" else ""
-            li = QListWidgetItem(f"{due_s}{rep} — {r.text}")
-            li.setData(Qt.ItemDataRole.UserRole, r.id)
-            self.rem_list.addItem(li)
+        return None
 
-    def _delete_selected_reminder(self, item: QListWidgetItem) -> None:
-        rid = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(rid, int):
-            self.storage.delete_reminder(rid)
-            self.refresh_reminders()
+    def _reload_notes(self) -> None:
+        return None
 
-    @staticmethod
-    def _play_alert_chime() -> None:
-        import sys
-        import threading
-
-        def _beep() -> None:
-            if sys.platform != "win32":
-                return
-            try:
-                import winsound
-
-                winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
-                winsound.Beep(880, 110)
-                winsound.Beep(1175, 160)
-            except Exception:
-                pass
-
-        threading.Thread(target=_beep, daemon=True).start()
-
-    def _on_second_tick(self) -> None:
-        if self._timer_running:
-            self._timer_remaining -= 1
-            self._update_timer_display()
-            if self._timer_remaining <= 0:
-                self._timer_running = False
-                self.timer_start_btn.setText(tr("start"))
-                self._play_alert_chime()
-                self.timer_updated.emit(0, False, self._timer_label)
-                self.timer_finished.emit(self._timer_label)
-            else:
-                self.timer_updated.emit(self._timer_remaining, True, self._timer_label)
-
-        # Check due reminders
-        now = time.time()
-        changed = False
-        for rem in list(self._rem_map.values()):
-            if rem.active and not rem.triggered and rem.due_at <= now:
-                self._play_alert_chime()
-                self.reminder_triggered.emit(rem)
-                nxt = next_occurrence(datetime.fromtimestamp(rem.due_at), rem.repeat_days)
-                if nxt:
-                    self.storage.update_reminder(rem.id, due_at=nxt.timestamp(), triggered=False)
-                else:
-                    self.storage.update_reminder(rem.id, active=False, triggered=True)
-                changed = True
-        if changed:
-            self.refresh_reminders()
+    def add_reminder_phrase(self, phrase: str) -> bool:
+        sec = parse_duration_seconds(phrase)
+        if sec and sec > 0:
+            self.start_timer(sec, phrase)
+            return True
+        return False

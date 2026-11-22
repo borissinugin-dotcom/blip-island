@@ -2188,15 +2188,10 @@ class HomeTab(QWidget):
         self.player_combo.addItem("Auto Player", "")
         self.player_combo.currentIndexChanged.connect(self._on_player_selected)
         self.lyrics_btn = QPushButton(tr("lyrics"))
-        self.lyrics_btn.setMinimumWidth(0)
-        self.lyrics_btn.setFixedHeight(28)
-        self.lyrics_btn.setStyleSheet(
-            "min-height: 26px; max-height: 28px; border-radius: 14px; padding: 0px 10px; font-size: 11px;"
-        )
         self.lyrics_btn.setCheckable(True)
         self.lyrics_btn.clicked.connect(self._toggle_lyrics)
+        self.lyrics_btn.hide()
         sel_row.addWidget(self.player_combo, 1)
-        sel_row.addWidget(self.lyrics_btn)
         meta_col.addLayout(sel_row)
         top_row.addLayout(meta_col, 1)
         mc_lay.addLayout(top_row)

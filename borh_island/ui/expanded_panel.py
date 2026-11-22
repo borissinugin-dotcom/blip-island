@@ -776,7 +776,7 @@ class ExpandedPanel(QWidget):
             ("home", tr("tab_home")),
             ("chat", tr("tab_chat")),
             ("character", tr("tab_character")),
-            ("notes", tr("tab_notes")),
+            ("notes", "Часы и таймер"),
             ("weather", tr("tab_weather")),
             ("controls", tr("tab_controls")),
         ]
