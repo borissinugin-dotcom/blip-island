@@ -2770,7 +2770,7 @@ class AtmosphericScenePainter:
         buf_y0 = y0 - 18.0
         buf_w = max(80.0, buf_x1 - buf_x0)
         buf_h = max(60.0, min(h * 0.62, 230.0) + 36.0)
-        buf_scale = 0.18 + 0.10 * max(0.25, min(1.0, float(quality)))
+        buf_scale = 0.15 + 0.09 * max(0.25, min(1.0, float(quality)))
         iw = max(16, int(math.ceil(buf_w * buf_scale)))
         ih = max(16, int(math.ceil(buf_h * buf_scale)))
 
@@ -2784,7 +2784,7 @@ class AtmosphericScenePainter:
             and sim._buf_img.width() == iw
             and sim._buf_img.height() == ih
             and sim._buf_key == buf_key
-            and (now_b - sim._buf_ts) < 0.065
+            and (now_b - sim._buf_ts) < 0.095
         ):
             buf_target = sim._buf_img
             smoke_loci = sim._buf_loci
@@ -3140,9 +3140,10 @@ class AtmosphericScenePainter:
             p.save()
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             bg_snow = QPainterPath()
+            glint_snow = QPainterPath()
             period_sx = span_x * 2.0
             for i in range(n_snow):
-                plane = i % 6  # 0,1 = fine far dust; 2,3 = crisp crystals; 4 = soft foreground bokeh; 5 = ice glints
+                plane = i % 6  # 0,1 = fine far dust; 2,3 = crisp crystals; 4 = soft foreground 3D bokeh; 5 = ice glints
                 # Golden-ratio / Knuth multiplicative hash avoids periodic horizontal banding
                 hx = ((i * 2654435761) & 0xFFFF) / 65535.0
                 hy = (((i * 2246822519) + 12347) & 0xFFFF) / 65535.0
@@ -3189,11 +3190,14 @@ class AtmosphericScenePainter:
                 if plane <= 1:
                     r_bg = 0.95 + (i % 2) * 0.45
                     bg_snow.addEllipse(QPointF(sx, sy), r_bg, r_bg)
+                elif plane == 5:
+                    r_gl = 1.15 + (i % 2) * 0.55
+                    glint_snow.addEllipse(QPointF(sx, sy), r_gl, r_gl)
                 else:
                     var = 0 if plane == 4 else (2 + (i % 2))
                     pm_sn = _get_snow_sprite_pixmap(var, 24)
-                    sz_draw = (5.2 + (i % 3) * 1.3) if plane == 4 else (3.4 + (i % 2) * 0.95)
-                    alpha_op = max(0.25, min(0.92, snow_amt * (0.62 if plane == 4 else 0.85)))
+                    sz_draw = (5.8 + (i % 3) * 1.6) if plane == 4 else (3.4 + (i % 2) * 0.95)
+                    alpha_op = max(0.25, min(0.92, snow_amt * (0.58 if plane == 4 else 0.86)))
                     p.setOpacity(alpha_op)
                     p.drawPixmap(QRectF(sx - sz_draw, sy - sz_draw, sz_draw * 2.0, sz_draw * 2.0), pm_sn, snow_src)
 
@@ -3201,6 +3205,8 @@ class AtmosphericScenePainter:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(238, 245, 255, int(round(145 * snow_amt))))
             p.drawPath(bg_snow)
+            p.setBrush(QColor(255, 255, 255, int(round(215 * snow_amt))))
+            p.drawPath(glint_snow)
             p.restore()
 
     @staticmethod
@@ -3689,7 +3695,7 @@ class AtmosphericScenePainter:
             and grass_sim is not None
             and grass_sim._canopy_img is not None
             and grass_sim._canopy_key == can_key
-            and abs(phase_t - grass_sim._canopy_phase) < 0.022
+            and abs(phase_t - grass_sim._canopy_phase) < 0.048
         ):
             p.drawImage(QPointF(can_x0, can_y0), grass_sim._canopy_img)
         else:
@@ -4094,39 +4100,81 @@ class AtmosphericScenePainter:
         wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
 
         # -1. Distant misty forest silhouette along the horizon behind the cabin & foreground trees
-        p.save()
-        for layer_idx, (l_scale, l_alpha, y_off) in enumerate(((0.62, 85, 6.0), (0.85, 130, 10.0))):
-            if layer_idx == 0:
-                f_col = QColor(
-                    int(round(36 * (1.0 - light_w * 0.65) + 45 * snow_amt)),
-                    int(round(68 * (1.0 - light_w * 0.62) + 40 * snow_amt)),
-                    int(round(58 * (1.0 - light_w * 0.48) + 48 * snow_amt)),
-                    l_alpha,
-                )
-            else:
-                f_col = QColor(
-                    int(round(24 * (1.0 - light_w * 0.62) + 32 * snow_amt)),
-                    int(round(56 * (1.0 - light_w * 0.60) + 30 * snow_amt)),
-                    int(round(42 * (1.0 - light_w * 0.45) + 36 * snow_amt)),
-                    l_alpha,
-                )
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(f_col)
-            step_f = 22.0 * sc * l_scale
-            n_trees_bg = int(core.width() / max(8.0, step_f)) + 2
-            for fi in range(n_trees_bg):
-                fx = core.left() + fi * step_f + ((fi * 17) % 7) * 2.0 * sc
-                fh = (44.0 + ((fi * 31 + layer_idx * 19) % 34)) * sc * l_scale
-                fw = (16.0 + ((fi * 13) % 10)) * sc * l_scale
-                fy_b = turf_y + y_off * sc
-                f_lean = wind_dir * (1.5 + 8.0 * wind_force) * sc * l_scale
-                fp = QPainterPath()
-                fp.moveTo(fx + f_lean, fy_b - fh)
-                fp.lineTo(fx + fw * 0.5, fy_b)
-                fp.lineTo(fx - fw * 0.5, fy_b)
-                fp.closeSubpath()
-                p.drawPath(fp)
-        p.restore()
+        # Cached into 2 offscreen QImages (conifer pine forest in snow, woodland in clear/rain) and swayed smoothly!
+        is_pine_bg = snow_amt > 0.25
+        f_w = max(64, int(math.ceil(core.width() + 40.0)))
+        f_h = max(48, int(math.ceil(96.0 * sc)))
+        forest_key = (f_w, f_h, is_pine_bg, round(light_w * 10.0), round(snow_amt * 8.0), round(sc, 2))
+        cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
+        if cache_dict is None:
+            cache_dict = {}
+            AtmosphericScenePainter._forest_cache = cache_dict
+        cached_layers = cache_dict.get(forest_key)
+        if cached_layers is None:
+            if len(cache_dict) > 6:
+                cache_dict.clear()
+            cached_layers = []
+            for layer_idx, (l_scale, l_alpha, y_off) in enumerate(((0.66, 92, 6.0), (0.88, 138, 10.0))):
+                img_f = QImage(f_w, f_h, QImage.Format.Format_ARGB32_Premultiplied)
+                img_f.fill(0)
+                fp_p = QPainter(img_f)
+                fp_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                if layer_idx == 0:
+                    f_col = QColor(
+                        int(round(30 * (1.0 - light_w * 0.65) + 40 * snow_amt)),
+                        int(round(64 * (1.0 - light_w * 0.62) + 38 * snow_amt)),
+                        int(round(52 * (1.0 - light_w * 0.48) + 46 * snow_amt)),
+                        l_alpha,
+                    )
+                else:
+                    f_col = QColor(
+                        int(round(18 * (1.0 - light_w * 0.62) + 28 * snow_amt)),
+                        int(round(50 * (1.0 - light_w * 0.60) + 26 * snow_amt)),
+                        int(round(36 * (1.0 - light_w * 0.45) + 32 * snow_amt)),
+                        l_alpha,
+                    )
+                batched = QPainterPath()
+                snow_batched = QPainterPath()
+                step_f = 22.0 * sc * l_scale
+                n_trees_bg = int(f_w / max(8.0, step_f)) + 2
+                base_fy = float(f_h) - 2.0
+                for fi in range(n_trees_bg):
+                    fx = 20.0 + fi * step_f + ((fi * 17) % 7) * 2.0 * sc
+                    fh = (44.0 + ((fi * 31 + layer_idx * 19) % 36)) * sc * l_scale
+                    fw = (18.0 + ((fi * 13) % 10)) * sc * l_scale
+                    if is_pine_bg:
+                        # 3-tier conifer pine silhouette
+                        for t_i in range(3):
+                            t_top_y = base_fy - fh * (1.0 - t_i * 0.24)
+                            t_bot_y = base_fy - fh * (0.58 - t_i * 0.29)
+                            t_hw = fw * (0.38 + t_i * 0.22)
+                            batched.moveTo(fx, t_top_y)
+                            batched.lineTo(fx + t_hw, t_bot_y)
+                            batched.lineTo(fx - t_hw, t_bot_y)
+                            batched.closeSubpath()
+                        if layer_idx == 1:
+                            snow_batched.moveTo(fx, base_fy - fh)
+                            snow_batched.lineTo(fx + fw * 0.22, base_fy - fh * 0.78)
+                            snow_batched.lineTo(fx - fw * 0.22, base_fy - fh * 0.78)
+                            snow_batched.closeSubpath()
+                    else:
+                        batched.moveTo(fx, base_fy - fh)
+                        batched.lineTo(fx + fw * 0.5, base_fy)
+                        batched.lineTo(fx - fw * 0.5, base_fy)
+                        batched.closeSubpath()
+                fp_p.setPen(Qt.PenStyle.NoPen)
+                fp_p.setBrush(f_col)
+                fp_p.drawPath(batched)
+                if is_pine_bg and not snow_batched.isEmpty():
+                    fp_p.setBrush(QColor(232, 242, 255, int(round(95 * snow_amt))))
+                    fp_p.drawPath(snow_batched)
+                fp_p.end()
+                cached_layers.append((img_f, y_off))
+            cache_dict[forest_key] = cached_layers
+
+        for layer_idx, (img_f, y_off) in enumerate(cached_layers):
+            sway_x = math.sin(phase_t * (1.2 + wind_force * 2.2) + layer_idx * 1.4) * (1.8 + 6.5 * wind_force) * sc
+            p.drawImage(QPointF(core.left() - 20.0 + sway_x, turf_y + y_off * sc - float(f_h)), img_f)
 
         def _draw_snowball(cx: float, cy: float, r: float, rot: float = 0.0) -> None:
             p.save()
@@ -4340,7 +4388,7 @@ class AtmosphericScenePainter:
                 p.drawLine(QPointF(tx_l + lean * 0.62, by_l - 116.0 * ts), QPointF(tx_l - 12.0 * ts + lean * 0.92, by_l - 160.0 * ts))
                 p.drawLine(QPointF(tx_l + lean * 0.62, by_l - 116.0 * ts), QPointF(tx_l + 14.0 * ts + lean * 0.92, by_l - 162.0 * ts))
 
-                # 150 dense individual fluttering leaves (zero circular blobs!)
+                # 150 dense individual fluttering leaves batched into 5 QPainterPaths (zero per-leaf save/restore!)
                 leaf_colors = (
                     QColor(21, 128, 61),
                     QColor(22, 163, 74),
@@ -4348,6 +4396,7 @@ class AtmosphericScenePainter:
                     QColor(74, 222, 128),
                     QColor(134, 239, 172),
                 )
+                leaf_paths = [QPainterPath() for _ in range(5)]
                 n_leaves = 150
                 for li in range(n_leaves):
                     ang_c = ((li * 2.39996) + seed_off) % 6.28318
@@ -4358,24 +4407,25 @@ class AtmosphericScenePainter:
                     lx += flutter * (2.2 + 5.5 * wind_force) * ts
                     ly += math.cos(phase_t * 2.5 + li * 0.95) * (1.4 + 2.5 * wind_force) * ts
                     l_ang = ang_c + flutter * (0.36 + 0.48 * wind_force)
-                    lw = (9.0 + (li % 3) * 2.2) * ts
-                    lh = (4.8 + (li % 2) * 1.2) * ts
-                    # Inner leaves slightly darker for natural depth
+                    ca, sa = math.cos(l_ang), math.sin(l_ang)
+                    hlw = (4.5 + (li % 3) * 1.1) * ts
+                    hlh = (4.8 + (li % 2) * 1.2) * ts
+                    p0x, p0y = lx - hlw * ca, ly - hlw * sa
+                    p1x, p1y = lx + hlw * ca, ly + hlw * sa
+                    c1x, c1y = lx + hlh * sa, ly - hlh * ca
+                    c2x, c2y = lx - hlh * sa, ly + hlh * ca
                     depth_idx = 0 if li < 45 else (1 + (li % 4))
-                    lcol = leaf_colors[depth_idx]
+                    lp = leaf_paths[depth_idx]
+                    lp.moveTo(p0x, p0y)
+                    lp.quadTo(c1x, c1y, p1x, p1y)
+                    lp.quadTo(c2x, c2y, p0x, p0y)
+                for idx_c, lp in enumerate(leaf_paths):
+                    lcol = leaf_colors[idx_c]
                     if light_w > 0.25:
                         lcol = lcol.darker(int(100 + 68 * light_w))
-                    p.save()
-                    p.translate(lx, ly)
-                    p.rotate(math.degrees(l_ang))
-                    leaf_p = QPainterPath()
-                    leaf_p.moveTo(-lw * 0.5, 0.0)
-                    leaf_p.quadTo(0.0, -lh, lw * 0.5, 0.0)
-                    leaf_p.quadTo(0.0, lh, -lw * 0.5, 0.0)
                     p.setPen(QPen(lcol.darker(145), 0.65))
                     p.setBrush(lcol)
-                    p.drawPath(leaf_p)
-                    p.restore()
+                    p.drawPath(lp)
                 p.restore()
 
             _draw_leafy_tree(core.right() - 128.0 * sc, 1.0, 0.0)
