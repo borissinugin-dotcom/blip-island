@@ -15,7 +15,7 @@ from pathlib import Path
 from borh_island.core.security import decrypt_secret, encrypt_secret
 
 APP_PRODUCT_NAME = "Blip"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 WORKER_BASE_URL = "https://blip-license-worker.blip-borh.workers.dev"
 ED25519_PUBLIC_KEY_B64U = "lue3Ld1hP5dYrUlXjrDRxmv6UWKl_vKAOjzmHKWJH8w"
 
@@ -270,7 +270,14 @@ class LicenseManager:
     def __init__(self, project_dir: Path | None = None, appdata_dir: Path | None = None) -> None:
         self.project_dir = project_dir or Path(__file__).resolve().parent.parent.parent
         local_app = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-        self.appdata_dir = appdata_dir or (local_app / APP_PRODUCT_NAME)
+        if appdata_dir is not None:
+            self.appdata_dir = appdata_dir
+        elif os.environ.get("BLIP_DEV_DIR"):
+            self.appdata_dir = Path(os.environ["BLIP_DEV_DIR"])
+        elif os.environ.get("BLIP_PROFILE", "").strip().lower() == "dev":
+            self.appdata_dir = local_app / f"{APP_PRODUCT_NAME}Dev"
+        else:
+            self.appdata_dir = local_app / APP_PRODUCT_NAME
         self.appdata_dir.mkdir(parents=True, exist_ok=True)
         self.hwid = get_hwid()
         self._cached_status: LicenseStatus | None = None
@@ -465,7 +472,16 @@ class LicenseManager:
             pass
 
     def _load_dev_unlock(self) -> tuple[bool, set[str], bool, bool, dict]:
-        data = self._read_dpapi_json(self._dev_file, "DevUnlock")
+        data: dict = {}
+        if self._dev_file.exists():
+            try:
+                dec = decrypt_secret(self._dev_file.read_text(encoding="utf-8").strip())
+                if dec:
+                    parsed = json.loads(dec)
+                    if isinstance(parsed, dict):
+                        data = parsed
+            except Exception:
+                data = {}
         if not data or not hmac.compare_digest(str(data.get("hwid", "")), self.hwid):
             return False, set(), False, False, {}
         used_codes = [str(x) for x in data.get("used_codes", [])]
@@ -584,8 +600,6 @@ class LicenseManager:
         return st
 
     def is_character_allowed(self, char_id: str) -> bool:
-        if str(char_id or "").startswith("builtin_"):
-            return True
         st = self.get_status()
         if char_id in DEV_EXCLUSIVE_CHARACTER_IDS:
             return st.all_dev_unlocked or (char_id in st.unlocked_dev_chars)

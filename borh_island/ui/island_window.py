@@ -92,7 +92,7 @@ from .theme import ThemePalette, resolve_palette, resolve_time_accent
 
 # Generous transparent perimeter margin reserved for liquid droplet, side curving & music waves
 _DROP_PAD_X = 165
-_DROP_PAD_TOP = 20
+_DROP_PAD_TOP = 26
 _DROP_PAD_BOTTOM = 165
 
 _VIDEO_PLAYER_EXES = frozenset({
@@ -2841,13 +2841,15 @@ class IslandWindow(QWidget):
         else:
             cx = self.x() + self.width() * 0.5
             cy = self.y() + self.height() * 0.5
-        if not (bool(getattr(self, "_fg_screen_covered", False)) or self._hide_state == "hidden" or self.isMinimized()):
+        if not (self._hide_state == "hidden" or self.isMinimized()):
             dx = max(-1.0, min(1.0, (pos.x() - cx) / 320.0))
             dy = max(-1.0, min(1.0, (pos.y() - cy) / 220.0))
             prev_c = getattr(self, "_last_char_norm", (-9.0, -9.0))
             if abs(dx - prev_c[0]) > 0.015 or abs(dy - prev_c[1]) > 0.015:
                 self._last_char_norm = (dx, dy)
                 self.character.set_cursor_norm(dx, dy)
+                if self._is_builtin_full_pill():
+                    self.update()
         self._update_liquid_physics(QPointF(pos.x(), pos.y()), _from_timer=True)
 
         # Global click-outside-to-collapse detector (survives frameless focus quirks)
@@ -2929,7 +2931,7 @@ class IslandWindow(QWidget):
             self._last_fg_poll_ts = now_m
             fg = get_foreground_window_info()
             self._cached_fg_screen_covered = bool(
-                fg is not None and fg.pid != _OWN_PID and (fg.is_fullscreen or fg.is_maximized)
+                fg is not None and fg.pid != _OWN_PID and fg.is_fullscreen
             )
             if cfg.hide_in_fullscreen or cfg.auto_hide:
                 excl = {x.strip().lower() for x in cfg.auto_hide_excluded_apps}
@@ -3984,26 +3986,15 @@ class IslandWindow(QWidget):
         radius = 21.5 if (not self._expanded and not self._music_strip_open) else 18.0
         path = self._build_liquid_path(core, radius)
 
-        # Collapsed pill is ALWAYS pure solid black (no Liquid Glass, no Frost Glass)
+        # Collapsed pill: full-island themed geometry for built-in styles, otherwise pure solid black
         if not self._expanded:
-            is_builtin = self.character.character_id.startswith("builtin_")
-            if is_builtin and not (collapsed_tint or self._activity_active or self._drop_amp > 0.22 or self._alarm_active):
-                b_col = QColor(self.character.builtin_accent_hex())
-                b_col.setAlpha(95)
-            elif collapsed_tint or self._activity_active or self._drop_amp > 0.22 or self._alarm_active:
-                b_col = border
+            if self.character.character_id.startswith("builtin_"):
+                self.character.paint_full_builtin_island(p, core, path, draw_eyes=self._is_builtin_full_pill())
             else:
-                b_col = QColor(255, 255, 255, 34)
-            p.setPen(QPen(b_col, 1.5))
-            p.setBrush(QColor(0, 0, 0, 255))
-            p.drawPath(path)
-            if self.pill_bar.isVisible() and self._is_builtin_full_pill():
-                self.character.paint_full_island_face(p, core)
-                if self.character.has_island_top_addon():
-                    self.character.paint_island_top_addon(p, core, core.center().x())
-            elif self.pill_bar.isVisible() and self.character.isVisible() and self.character.has_island_top_addon():
-                char_pos = self.character.mapTo(self, self.character.rect().center())
-                self.character.paint_island_top_addon(p, core, float(char_pos.x()))
+                b_col = border if (collapsed_tint or self._activity_active or self._drop_amp > 0.22 or self._alarm_active) else QColor(255, 255, 255, 34)
+                p.setPen(QPen(b_col, 1.5))
+                p.setBrush(QColor(0, 0, 0, 255))
+                p.drawPath(path)
         elif self._expanded:
             from ..core.licensing import get_license_manager
 

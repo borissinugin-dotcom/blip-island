@@ -333,16 +333,24 @@ class BlipProWidget(QWidget):
         form = QFormLayout(dlg)
         code_box = QComboBox()
         code_box.setEditable(True)
-        for c in (
-            "BLIP-FULL-C23EA8D2",
-            "BLIP-FULL-F0739A26",
-            "BLIP-FULL-777A3C47",
-            "BLIP-FULL-C5DBA0B1",
-            "NOvaBEaSt1488",
-            "kamaz19367buLLDOZA",
-            "vanyyBARsiK3825492",
-        ):
-            code_box.addItem(c)
+        policies = self.mgr.load_code_policies()
+        # Only salted SHA-256 hashes & safe labels are stored in public source (never plaintext keys!)
+        known_entries = (
+            ("Full Dev #1 (BLIP-FULL-C23E...)", "ff0f3d372da7c50d331548f1ce05c74f743a0e780e4bd0f0a0e2b6efe75e0bab"),
+            ("Full Dev #2 (BLIP-FULL-F073...)", "148f0bed4a8bfd28eb96f2b2162a3356fa938cc2e664a7d4e5dc116280c29f20"),
+            ("Full Dev #3 (BLIP-FULL-777A...)", "7c7f15fbd83b699d3e936fecd53d814f45878650fdff5ce1dd457d4470dcf3d5"),
+            ("Full Dev #4 (BLIP-FULL-C5DB...)", "ccebcd27c45983769cc7fdf3502128e8373a014fb8622feda9f97f8291617a14"),
+            ("Purple Star + PRO", "ce872be183e8674204aad6395a4e4f60845a6510081a973214f2022889ab2595"),
+            ("KAMAZ + PRO", "9177a58a01c0c65dc1bb98c10c418ce83ec30d69d3882e5ce5f9a8232f0518c2"),
+            ("Mei Mei + PRO", "50243267e7da36155d2e8dec6565132c4eab2c6bfbe37ef55b52d32dc92b32b3"),
+        )
+        for lbl, digest in known_entries:
+            pol = policies.get(digest, {})
+            tag = pol.get("mode", "active")
+            code_box.addItem(f"{lbl} [{tag}]", digest)
+        for digest, pol in policies.items():
+            if not any(d == digest for _, d in known_entries):
+                code_box.addItem(f"{pol.get('label', digest[:10])} [{pol.get('mode', 'active')}]", digest)
         mode_box = QComboBox()
         mode_box.addItem("Активен (полный доступ)", "active")
         mode_box.addItem("Бесплатный режим (FREE)", "forced_free")
@@ -357,8 +365,10 @@ class BlipProWidget(QWidget):
 
         def _apply() -> None:
             feats = [x.strip() for x in feat_edit.text().split(",") if x.strip()]
+            idx = code_box.currentIndex()
+            target_val = code_box.itemData(idx) if (idx >= 0 and code_box.currentText() == code_box.itemText(idx)) else code_box.currentText().strip()
             ok, msg = self.mgr.set_code_policy(
-                code_box.currentText().strip(),
+                str(target_val or ""),
                 mode=str(mode_box.currentData() or "active"),
                 block_payment=bool(chk_block_pay.isChecked()),
                 blocked_features=feats,

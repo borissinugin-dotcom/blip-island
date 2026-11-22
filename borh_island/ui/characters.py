@@ -107,17 +107,17 @@ BUILTIN_CHARACTER_DEFS: list[tuple[str, str, str]] = [
     ("builtin_sprout", "Лиана (вниз)", "Hanging Vine"),
     ("builtin_shark_fin", "Хвост акулы", "Shark Tail"),
     ("builtin_dino_spikes", "Хвост дино", "Dino Tail"),
-    ("builtin_headphones", "Шнур наушников", "Audio Cord"),
-    ("builtin_ufo_dome", "Луч НЛО (вниз)", "UFO Beam"),
-    ("builtin_bow", "Длинный бант", "Long Ribbon"),
-    ("builtin_neon_eyes", "Большие неон-глаза", "Big Neon Eyes"),
-    ("builtin_cyclops", "Огромный циклоп", "Giant Cyclops"),
-    ("builtin_visor", "Большой визор", "Wide Visor"),
-    ("builtin_cat_eyes", "Большие кошачьи", "Big Cat Eyes"),
-    ("builtin_sleepy_eyes", "Большие сонные", "Big Sleepy Eyes"),
-    ("builtin_angry_eyes", "Большие злые", "Big Fierce Eyes"),
-    ("builtin_pixel_eyes", "Большие пиксели", "Big Pixel Eyes"),
-    ("builtin_ghost_peek", "Щупальце / Призрак", "Ghost Tentacle"),
+    ("builtin_headphones", "Остров-наушники", "Headphones Island"),
+    ("builtin_ufo_dome", "НЛО с лучом", "UFO Tractor Beam"),
+    ("builtin_bow", "Длинный бант", "Ribbon Island"),
+    ("builtin_neon_eyes", "Кибер-неон", "Cyber Neon"),
+    ("builtin_cyclops", "Броня циклопа", "Cyclops Armor"),
+    ("builtin_visor", "Кибер-визор", "Sci-Fi Visor"),
+    ("builtin_cat_eyes", "Ночная пантера", "Night Panther"),
+    ("builtin_sleepy_eyes", "Сонная ночь", "Sleepy Night"),
+    ("builtin_angry_eyes", "Огненная ярость", "Flame Fury"),
+    ("builtin_pixel_eyes", "Квадратный 8-Bit", "Square 8-Bit"),
+    ("builtin_ghost_peek", "Призрак-остров", "Ghost Island"),
 ]
 
 CHARACTER_DEFS.extend(BUILTIN_CHARACTER_DEFS)
@@ -771,29 +771,59 @@ class CharacterWidget(QWidget):
         p.restore()
 
     def _draw_ghost(self, p: QPainter, cx: float, cy: float, r: float) -> None:
-        drift_x = math.sin(self._phase * 1.4) * r * 0.09
+        drift_x = math.sin(self._phase * 1.4) * r * 0.08
+        bob_y = math.sin(self._phase * 2.2) * r * 0.06
         cx += drift_x
+        cy += bob_y
+
+        # Soft neon cyan-lavender aura behind the cute ghost
+        aura = QRadialGradient(QPointF(cx, cy), r * 1.45)
+        aura.setColorAt(0.0, QColor(129, 140, 248, 125))
+        aura.setColorAt(0.55, QColor(56, 189, 248, 55))
+        aura.setColorAt(1.0, QColor(56, 189, 248, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(aura)
+        p.drawEllipse(QPointF(cx, cy), r * 1.38, r * 1.32)
+
+        # Cute waving little ghost arms
+        arm_wave = math.sin(self._phase * 3.4) * r * 0.16
+        p.setBrush(QColor("#E0E7FF"))
+        p.setPen(QPen(QColor("#A5B4FC"), max(1.0, r * 0.05)))
+        p.drawEllipse(QPointF(cx - r * 0.86, cy + r * 0.14 - arm_wave), r * 0.24, r * 0.16)
+        p.drawEllipse(QPointF(cx + r * 0.86, cy + r * 0.14 + arm_wave), r * 0.24, r * 0.16)
+
         path = QPainterPath()
-        path.moveTo(cx - r * 0.88, cy + r * 0.08)
-        path.arcTo(QRectF(cx - r * 0.88, cy - r * 0.95, r * 1.76, r * 1.80), 180, -180)
-        wave = math.sin(self._phase * 2.5) * r * 0.12
-        path.lineTo(cx + r * 0.88, cy + r * 0.72 + wave)
-        path.quadTo(cx + r * 0.55, cy + r * 0.98 - wave, cx + r * 0.28, cy + r * 0.72)
-        path.quadTo(cx, cy + r * 1.00 + wave, cx - r * 0.30, cy + r * 0.72)
-        path.quadTo(cx - r * 0.60, cy + r * 0.96 - wave, cx - r * 0.88, cy + r * 0.70)
+        path.moveTo(cx - r * 0.84, cy + r * 0.08)
+        path.arcTo(QRectF(cx - r * 0.84, cy - r * 0.92, r * 1.68, r * 1.72), 180, -180)
+        wave = math.sin(self._phase * 2.5) * r * 0.10
+        path.lineTo(cx + r * 0.84, cy + r * 0.72 + wave)
+        path.quadTo(cx + r * 0.52, cy + r * 0.98 - wave, cx + r * 0.26, cy + r * 0.72)
+        path.quadTo(cx, cy + r * 1.00 + wave, cx - r * 0.28, cy + r * 0.72)
+        path.quadTo(cx - r * 0.56, cy + r * 0.96 - wave, cx - r * 0.84, cy + r * 0.70)
         path.closeSubpath()
 
-        g = self._sphere_brush(cx, cy - r * 0.2, r * 1.1, "#F8FAFC", "#C7D2FE", "#6366F1")
+        g = self._sphere_brush(cx, cy - r * 0.2, r * 1.1, "#FFFFFF", "#E0E7FF", "#818CF8")
         p.setBrush(g)
-        p.setPen(QPen(QColor(255, 255, 255, 165), max(1.0, r * 0.06)))
+        p.setPen(QPen(QColor("#67E8F9"), max(1.2, r * 0.07)))
         p.drawPath(path)
-        # Rising ectoplasm spirit wisp
+
+        # Cute floating neon sparkle wisps
         orb_t = (self._phase * 0.5) % 1.0
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(224, 231, 255, int(190 * (1.0 - orb_t))))
-        p.drawEllipse(QPointF(cx - r * 0.88 + math.sin(self._phase * 2) * r * 0.1, cy - r * 0.2 - orb_t * r * 0.8), r * 0.10, r * 0.10)
-        self._draw_cheeks(p, cx, cy + r * 0.08, r * 0.38, r, "#A78BFA")
-        self._draw_eyes(p, cx, cy - r * 0.14, r * 0.31, r * 0.19, color="#FFFFFF", pupil_hex="#1E1B4B")
+        p.setBrush(QColor(103, 232, 249, int(210 * (1.0 - orb_t))))
+        p.drawEllipse(QPointF(cx - r * 0.92 + math.sin(self._phase * 2.0) * r * 0.10, cy - r * 0.25 - orb_t * r * 0.75), r * 0.11, r * 0.11)
+        p.setBrush(QColor(244, 114, 182, int(190 * (1.0 - orb_t))))
+        p.drawEllipse(QPointF(cx + r * 0.90 + math.cos(self._phase * 2.2) * r * 0.08, cy - r * 0.45 - orb_t * r * 0.60), r * 0.08, r * 0.08)
+
+        # Rosy pink blushing cheeks + big kawaii eyes + cute tiny "w" mouth
+        self._draw_cheeks(p, cx, cy + r * 0.12, r * 0.42, r, "#F472B6")
+        self._draw_eyes(p, cx, cy - r * 0.10, r * 0.31, r * 0.23, color="#FFFFFF", pupil_hex="#1E1B4B")
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor("#4338CA"), max(1.2, r * 0.07), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        my = cy + r * 0.16
+        mw = r * 0.14
+        p.drawArc(QRectF(cx - mw, my - mw * 0.4, mw, mw * 0.8), 180 * 16, 180 * 16)
+        p.drawArc(QRectF(cx, my - mw * 0.4, mw, mw * 0.8), 180 * 16, 180 * 16)
 
     def _draw_dragon(self, p: QPainter, cx: float, cy: float, r: float) -> None:
         # Flapping emerald bat wings + glowing ember sparks
@@ -2185,6 +2215,191 @@ class CharacterWidget(QWidget):
     def builtin_accent_hex(self) -> str:
         spec = self._BUILTIN_SPECS.get(self.character_id)
         return spec[1] if spec else "#FFFFFF"
+
+    def paint_full_builtin_island(
+        self,
+        p: QPainter,
+        core: QRectF,
+        island_path: QPainterPath | None = None,
+        *,
+        draw_eyes: bool = True,
+    ) -> None:
+        """Transform the ENTIRE collapsed island's geometry, silhouette, fill, and mouse-deformed contour."""
+        cid = self.character_id
+        spec = self._BUILTIN_SPECS.get(cid, ("round", "#FFFFFF", "none"))
+        _, col_hex, addon = spec
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        cx, cy = core.center().x(), core.center().y()
+        x0, y0, w, h = core.left(), core.top(), core.width(), core.height()
+        # Use the mouse-deformed liquid contour path when available
+        def _draw_body(pen: QPen, brush: QColor | QLinearGradient) -> None:
+            p.setPen(pen)
+            p.setBrush(brush)
+            if island_path is not None:
+                p.drawPath(island_path)
+            else:
+                p.drawRoundedRect(core, 21.5, 21.5)
+
+        if cid == "builtin_ufo_dome":
+            # Full-width glowing green tractor beam shining down across the entire island
+            beam_grad = QLinearGradient(QPointF(cx, core.bottom()), QPointF(cx, core.bottom() + 92.0))
+            beam_grad.setColorAt(0.0, QColor(74, 222, 128, 135))
+            beam_grad.setColorAt(0.55, QColor(74, 222, 128, 55))
+            beam_grad.setColorAt(1.0, QColor(74, 222, 128, 0))
+            beam = QPolygonF([
+                QPointF(x0 + 18.0, core.bottom() - 2.0),
+                QPointF(x0 + w - 18.0, core.bottom() - 2.0),
+                QPointF(x0 + w + 28.0, core.bottom() + 92.0),
+                QPointF(x0 - 28.0, core.bottom() + 92.0),
+            ])
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(beam_grad)
+            p.drawPolygon(beam)
+            # Glass UFO dome on top of the saucer
+            dome_w = min(w * 0.48, 126.0)
+            p.setBrush(QColor(74, 222, 128, 85))
+            p.setPen(QPen(QColor("#86EFAC"), 1.6))
+            p.drawChord(QRectF(cx - dome_w * 0.5, y0 - 20.0, dome_w, 40.0), 0, 180 * 16)
+            # Flying saucer metallic disc body (deforms with mouse liquid path)
+            disc_grad = QLinearGradient(core.topLeft(), core.bottomLeft())
+            disc_grad.setColorAt(0.0, QColor(30, 41, 59))
+            disc_grad.setColorAt(0.5, QColor(12, 18, 30))
+            disc_grad.setColorAt(1.0, QColor(4, 8, 16))
+            _draw_body(QPen(QColor("#4ADE80"), 1.8), disc_grad)
+            # Glowing UFO rim lights across the entire saucer
+            p.setPen(Qt.PenStyle.NoPen)
+            n_lights = 7
+            for i in range(n_lights):
+                lx_pt = x0 + 14.0 + (w - 28.0) * (i / max(1, n_lights - 1))
+                pulse = 150 + int(100 * max(0.0, math.sin(self._phase * 4.5 + i * 0.9)))
+                p.setBrush(QColor(74, 222, 128, pulse))
+                p.drawEllipse(QPointF(lx_pt, core.bottom() - 6.5), 2.5, 2.5)
+        elif cid == "builtin_pixel_eyes":
+            # Crisp 8-bit square island (0px rounding + stepped pixel border + mouse warp via boundingRect)
+            sq = island_path.boundingRect() if island_path is not None else core
+            p.setPen(QPen(QColor("#4ADE80"), 2.0))
+            p.setBrush(QColor(0, 0, 0, 255))
+            p.drawRect(sq)
+            p.setPen(QPen(QColor(74, 222, 128, 75), 1.0))
+            p.drawRect(sq.adjusted(4.0, 4.0, -4.0, -4.0))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#4ADE80"))
+            for px, py in ((sq.left(), sq.top()), (sq.right() - 5, sq.top()), (sq.left(), sq.bottom() - 5), (sq.right() - 5, sq.bottom() - 5)):
+                p.drawRect(QRectF(px, py, 5.0, 5.0))
+        elif cid == "builtin_visor":
+            # Chamfered sci-fi visor helmet polygon (tracks liquid boundingRect)
+            vr = island_path.boundingRect() if island_path is not None else core
+            c_cut = 14.0
+            poly = QPolygonF([
+                QPointF(vr.left() + c_cut, vr.top()),
+                QPointF(vr.right() - c_cut, vr.top()),
+                QPointF(vr.right(), vr.top() + c_cut),
+                QPointF(vr.right(), vr.bottom() - c_cut),
+                QPointF(vr.right() - c_cut, vr.bottom()),
+                QPointF(vr.left() + c_cut, vr.bottom()),
+                QPointF(vr.left(), vr.bottom() - c_cut),
+                QPointF(vr.left(), vr.top() + c_cut),
+            ])
+            p.setPen(QPen(QColor("#22D3EE"), 1.8))
+            p.setBrush(QColor(2, 6, 18, 255))
+            p.drawPolygon(poly)
+        elif cid == "builtin_ghost_peek":
+            # Wavy ghost-sheet scalloped bottom across the entire island (follows liquid path bounds)
+            gr = island_path.boundingRect() if island_path is not None else core
+            gx0, gy0, gw, gh = gr.left(), gr.top(), gr.width(), gr.height()
+            gp = QPainterPath()
+            gp.moveTo(gx0, gy0 + 20.0)
+            gp.quadTo(gx0, gy0, gx0 + 20.0, gy0)
+            gp.lineTo(gx0 + gw - 20.0, gy0)
+            gp.quadTo(gx0 + gw, gy0, gx0 + gw, gy0 + 20.0)
+            gp.lineTo(gx0 + gw, gy0 + gh + 8.0)
+            waves = 8
+            seg_w = gw / waves
+            for i in range(waves - 1, -1, -1):
+                sx = gx0 + i * seg_w
+                gp.quadTo(sx + seg_w * 0.5, gy0 + gh + (20.0 if i % 2 == 0 else -2.0), sx, gy0 + gh + 8.0)
+            gp.closeSubpath()
+            p.setPen(QPen(QColor(248, 250, 252, 160), 1.6))
+            p.setBrush(QColor(12, 14, 22, 255))
+            p.drawPath(gp)
+        elif cid == "builtin_headphones":
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor("#A855F7"), 3.2))
+            p.drawArc(QRectF(x0 - 8.0, y0 - 18.0, w + 16.0, h + 28.0), 0, 180 * 16)
+            _draw_body(QPen(QColor("#C084FC"), 1.6), QColor(0, 0, 0, 255))
+            p.setBrush(QColor("#9333EA"))
+            p.drawRoundedRect(QRectF(x0 - 10.0, y0 + 4.0, 16.0, h - 8.0), 7.0, 7.0)
+            p.drawRoundedRect(QRectF(x0 + w - 6.0, y0 + 4.0, 16.0, h - 8.0), 7.0, 7.0)
+        elif cid == "builtin_cat_ears":
+            for sx in (-1.0, 1.0):
+                ex = cx + sx * (w * 0.34)
+                ear = QPolygonF([QPointF(ex - 16.0, y0 + 6.0), QPointF(ex + 16.0, y0 + 6.0), QPointF(ex + sx * 6.0, y0 - 18.0)])
+                p.setBrush(QColor(0, 0, 0, 255))
+                p.setPen(QPen(QColor(248, 250, 252, 120), 1.5))
+                p.drawPolygon(ear)
+                inner = QPolygonF([QPointF(ex - 9.0, y0 + 4.0), QPointF(ex + 9.0, y0 + 4.0), QPointF(ex + sx * 4.0, y0 - 10.0)])
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#FB7185"))
+                p.drawPolygon(inner)
+            _draw_body(QPen(QColor(248, 250, 252, 110), 1.5), QColor(0, 0, 0, 255))
+            p.setPen(QPen(QColor(248, 250, 252, 140), 1.3))
+            for sy in (-5.0, 0.0, 5.0):
+                p.drawLine(QPointF(x0 - 14.0, cy + sy * 1.4), QPointF(x0 + 8.0, cy + sy))
+                p.drawLine(QPointF(x0 + w - 8.0, cy + sy), QPointF(x0 + w + 14.0, cy + sy * 1.4))
+        elif cid == "builtin_devil_horns":
+            for sx in (-1.0, 1.0):
+                hx = cx + sx * (w * 0.36)
+                horn = QPolygonF([QPointF(hx - 10.0, y0 + 6.0), QPointF(hx + 10.0, y0 + 6.0), QPointF(hx + sx * 14.0, y0 - 20.0)])
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#DC2626"))
+                p.drawPolygon(horn)
+            _draw_body(QPen(QColor("#EF4444"), 1.8), QColor(12, 0, 2, 255))
+        elif cid == "builtin_shark_fin":
+            fin = QPolygonF([QPointF(cx - 16.0, y0 + 4.0), QPointF(cx + 18.0, y0 + 4.0), QPointF(cx + 10.0, y0 - 22.0)])
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#0284C7"))
+            p.drawPolygon(fin)
+            _draw_body(QPen(QColor("#38BDF8"), 1.8), QColor(2, 12, 24, 255))
+        elif cid == "builtin_crown":
+            crown = QPolygonF([
+                QPointF(cx - 32.0, y0 + 4.0),
+                QPointF(cx - 38.0, y0 - 16.0),
+                QPointF(cx - 14.0, y0 - 6.0),
+                QPointF(cx, y0 - 22.0),
+                QPointF(cx + 14.0, y0 - 6.0),
+                QPointF(cx + 38.0, y0 - 16.0),
+                QPointF(cx + 32.0, y0 + 4.0),
+            ])
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#FACC15"))
+            p.drawPolygon(crown)
+            _draw_body(QPen(QColor("#FACC15"), 1.8), QColor(0, 0, 0, 255))
+        elif cid == "builtin_angel_halo":
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor("#FDE047"), 2.4))
+            p.drawEllipse(QPointF(cx, y0 - 11.0), 34.0, 6.5)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(224, 242, 254, 180))
+            for sx in (-1.0, 1.0):
+                wx = x0 if sx < 0 else x0 + w
+                wing = QPolygonF([QPointF(wx, cy), QPointF(wx + sx * 26.0, cy - 16.0), QPointF(wx + sx * 22.0, cy + 4.0), QPointF(wx + sx * 14.0, cy + 12.0)])
+                p.drawPolygon(wing)
+            _draw_body(QPen(QColor("#BAE6FD"), 1.6), QColor(0, 0, 0, 255))
+        elif cid == "builtin_neon_eyes":
+            _draw_body(QPen(QColor(34, 211, 238, 95), 5.0), QColor(0, 0, 0, 255))
+            _draw_body(QPen(QColor("#22D3EE"), 1.8), QColor(0, 0, 0, 255))
+        else:
+            b_col = QColor(col_hex)
+            b_col.setAlpha(135)
+            _draw_body(QPen(b_col, 1.6), QColor(0, 0, 0, 255))
+
+        if draw_eyes:
+            self.paint_full_island_face(p, core)
+        # Hanging tails/paws/hands/cords sit on the LEFT edge of the island, never in the center
+        if addon != "none" and cid not in ("builtin_ufo_dome", "builtin_ghost_peek"):
+            self._draw_builtin_addon(p, x0 + 28.0, core.bottom() - 2.0, 20.0, addon)
+        p.restore()
 
     def paint_full_island_face(self, p: QPainter, core: QRectF) -> None:
         """Render the selected built-in style's BIG eyes centered across the entire collapsed island."""
