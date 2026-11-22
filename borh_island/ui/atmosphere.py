@@ -4015,6 +4015,19 @@ class AtmosphericScenePainter:
             quality=quality,
             outer_rect=outer_rect,
         )
+        snow_vis = atmo_anim.snow_amt if (atmo_anim is not None and atmo_anim.initialized) else (1.0 if wkind == "snow" else 0.0)
+        snowman_p = atmo_anim.snowman_p if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
+        tree_vis = atmo_anim.tree_vis if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
+        if snow_vis > 0.04 and (snowman_p > 0.01 or tree_vis > 0.02):
+            cls._paint_new_year_props(
+                p,
+                core,
+                turf_y=core.bottom() - 5.0,
+                phase_t=phase_t,
+                snow_amt=snow_vis,
+                snowman_p=snowman_p,
+                tree_vis=tree_vis,
+            )
         precip_rect = QRectF(core)
         cls.paint_precipitation(
             p,
@@ -4042,19 +4055,6 @@ class AtmosphericScenePainter:
             anim_state=atmo_anim,
             quality=quality,
         )
-        snow_vis = atmo_anim.snow_amt if (atmo_anim is not None and atmo_anim.initialized) else (1.0 if wkind == "snow" else 0.0)
-        snowman_p = atmo_anim.snowman_p if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
-        tree_vis = atmo_anim.tree_vis if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
-        if snow_vis > 0.04 and (snowman_p > 0.01 or tree_vis > 0.02):
-            cls._paint_new_year_props(
-                p,
-                core,
-                turf_y=core.bottom() - 5.0,
-                phase_t=phase_t,
-                snow_amt=snow_vis,
-                snowman_p=snowman_p,
-                tree_vis=tree_vis,
-            )
 
     @staticmethod
     def _paint_new_year_props(
@@ -4067,7 +4067,7 @@ class AtmosphericScenePainter:
         snowman_p: float,
         tree_vis: float,
     ) -> None:
-        """Paint New Year props: right-side Christmas tree (appears when closed) and live self-rolling snowman."""
+        """Paint large detailed New Year background props behind the grass: textured pine tree & live rolling snowman."""
 
         def _clamp01(v: float) -> float:
             return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
@@ -4076,205 +4076,304 @@ class AtmosphericScenePainter:
             t = _clamp01(v)
             return t * t * (3.0 - 2.0 * t)
 
+        sc = max(0.55, min(1.15, float(core.height()) / 560.0))
+
         def _draw_snowball(cx: float, cy: float, r: float, rot: float = 0.0) -> None:
             p.save()
-            grad = QLinearGradient(QPointF(cx - r * 0.4, cy - r), QPointF(cx + r * 0.5, cy + r))
-            grad.setColorAt(0.0, QColor(252, 254, 255))
-            grad.setColorAt(0.65, QColor(228, 238, 250))
-            grad.setColorAt(1.0, QColor(186, 204, 228))
-            p.setPen(QPen(QColor(255, 255, 255, 180), 1.0))
+            grad = QLinearGradient(QPointF(cx - r * 0.55, cy - r), QPointF(cx + r * 0.65, cy + r))
+            grad.setColorAt(0.0, QColor(253, 254, 255))
+            grad.setColorAt(0.48, QColor(235, 244, 254))
+            grad.setColorAt(0.84, QColor(204, 220, 240))
+            grad.setColorAt(1.0, QColor(168, 190, 218))
+            p.setPen(QPen(QColor(255, 255, 255, 195), 1.4))
             p.setBrush(grad)
             p.drawEllipse(QPointF(cx, cy), r, r * 0.96)
-            # Subtle rolling snow-clump speckles so rotation is visible
+
+            # Soft specular highlight on upper-left
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(200, 218, 238, 130))
-            for k in range(3):
-                ang = rot + k * 2.094
-                px = cx + math.cos(ang) * r * 0.48
-                py = cy + math.sin(ang) * r * 0.45
-                p.drawEllipse(QPointF(px, py), max(1.2, r * 0.14), max(1.0, r * 0.11))
+            p.setBrush(QColor(255, 255, 255, 110))
+            p.drawEllipse(QPointF(cx - r * 0.28, cy - r * 0.32), r * 0.36, r * 0.24)
+
+            # Detailed snow grain / frost texture speckles so rotation and surface read clearly at large scale
+            for k in range(10):
+                ang = rot + k * 0.6283 + (k % 3) * 0.41
+                dist_f = 0.26 + ((k * 37) % 10) * 0.055
+                px = cx + math.cos(ang) * r * dist_f
+                py = cy + math.sin(ang) * r * dist_f * 0.92
+                p.setBrush(QColor(185, 206, 232, 95) if k % 2 == 0 else QColor(255, 255, 255, 130))
+                pr = max(1.5, r * (0.045 + (k % 3) * 0.018))
+                p.drawEllipse(QPointF(px, py), pr * 1.15, pr * 0.85)
             p.restore()
 
-        # 1. Right-side New Year Christmas Tree with twinkling garland (pre-appears while closed)
-        if tree_vis > 0.02 and core.width() > 260.0:
+        # 1. Large Right-Side New Year Pine Tree with visible needles, ornaments & twinkling garland (behind grass)
+        if tree_vis > 0.02 and core.width() > 300.0:
             p.save()
             p.setOpacity(max(0.0, min(1.0, tree_vis * snow_amt)))
-            tx = core.right() - 56.0
-            by = turf_y + 1.0
+            tx = core.right() - 128.0 * sc
+            by = turf_y + 10.0 * sc
 
-            # Soft ambient glow behind tree
-            glow_img = _get_glow_disc_img((255, 224, 130), 65, 58)
-            p.drawImage(QRectF(tx - 48.0, by - 96.0, 96.0, 96.0), glow_img)
+            # Warm ambient tree glow
+            glow_img = _get_glow_disc_img((255, 220, 120), 68, 72)
+            p.drawImage(QRectF(tx - 150.0 * sc, by - 320.0 * sc, 300.0 * sc, 320.0 * sc), glow_img)
 
-            # Trunk
+            # Textured wood trunk
+            tw = 22.0 * sc
+            th = 42.0 * sc
+            trunk_g = QLinearGradient(QPointF(tx - tw * 0.5, by), QPointF(tx + tw * 0.5, by))
+            trunk_g.setColorAt(0.0, QColor(72, 44, 28))
+            trunk_g.setColorAt(0.45, QColor(102, 64, 42))
+            trunk_g.setColorAt(1.0, QColor(54, 32, 20))
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(82, 52, 34))
-            p.drawRoundedRect(QRectF(tx - 5.0, by - 14.0, 10.0, 15.0), 2.0, 2.0)
+            p.setBrush(trunk_g)
+            p.drawRoundedRect(QRectF(tx - tw * 0.5, by - th, tw, th + 6.0), 4.0, 4.0)
 
-            # 3 layered pine tiers with snow caps
+            # 5 lush pine tiers with jagged branch silhouettes & individual visible pine needles
             tiers = (
-                (by - 10.0, 32.0, 32.0),
-                (by - 30.0, 25.0, 28.0),
-                (by - 48.0, 18.0, 24.0),
+                (by - 28.0 * sc, 112.0 * sc, 82.0 * sc),
+                (by - 82.0 * sc, 94.0 * sc, 74.0 * sc),
+                (by - 134.0 * sc, 76.0 * sc, 66.0 * sc),
+                (by - 182.0 * sc, 58.0 * sc, 58.0 * sc),
+                (by - 224.0 * sc, 40.0 * sc, 52.0 * sc),
             )
-            for t_bot, half_w, tier_h in tiers:
+            for t_idx, (t_bot, half_w, tier_h) in enumerate(tiers):
                 t_top = t_bot - tier_h
-                tri = QPainterPath()
-                tri.moveTo(tx, t_top)
-                tri.lineTo(tx + half_w, t_bot)
-                tri.quadTo(tx, t_bot + 3.5, tx - half_w, t_bot)
-                tri.closeSubpath()
-                tg = QLinearGradient(QPointF(tx - half_w, t_top), QPointF(tx + half_w, t_bot))
-                tg.setColorAt(0.0, QColor(28, 102, 62))
-                tg.setColorAt(0.55, QColor(18, 76, 46))
-                tg.setColorAt(1.0, QColor(12, 52, 34))
-                p.setBrush(tg)
-                p.setPen(QPen(QColor(46, 138, 86, 130), 0.9))
-                p.drawPath(tri)
 
-                # Snow dusting along top/edge of tier
+                # Jagged feathery bough silhouette
+                bough = QPainterPath()
+                bough.moveTo(tx, t_top)
+                bough.lineTo(tx + half_w * 0.45, t_top + tier_h * 0.42)
+                bough.lineTo(tx + half_w, t_bot - 4.0 * sc)
+                n_teeth = 7 - (t_idx // 2)
+                for j in range(n_teeth * 2 + 1):
+                    frac = j / float(n_teeth * 2)
+                    bx_t = (tx + half_w) - frac * (half_w * 2.0)
+                    tooth_drop = (6.5 * sc) if (j % 2 == 1) else (-3.0 * sc)
+                    arch = math.sin(frac * math.pi) * (7.0 * sc)
+                    bough.lineTo(bx_t, t_bot + tooth_drop + arch)
+                bough.lineTo(tx - half_w * 0.45, t_top + tier_h * 0.42)
+                bough.closeSubpath()
+
+                tg = QLinearGradient(QPointF(tx - half_w, t_top), QPointF(tx + half_w, t_bot))
+                tg.setColorAt(0.0, QColor(32, 116, 68))
+                tg.setColorAt(0.50, QColor(18, 82, 48))
+                tg.setColorAt(1.0, QColor(10, 52, 32))
+                p.setBrush(tg)
+                p.setPen(QPen(QColor(46, 146, 88, 145), 1.0))
+                p.drawPath(bough)
+
+                # Visible individual pine needles fanning outward along the bough
+                p.save()
+                p.setClipPath(bough)
+                n_needles = int(round(36 - t_idx * 4))
+                for ni in range(n_needles):
+                    nf = (ni + 0.5) / float(n_needles)
+                    row_y = t_top + tier_h * (0.25 + ((ni * 37) % 10) * 0.072)
+                    span_at_y = half_w * max(0.18, (row_y - t_top) / max(1.0, tier_h))
+                    nx0 = tx + (nf * 2.0 - 1.0) * span_at_y * 0.92
+                    ang = ((nx0 - tx) / max(1.0, span_at_y)) * 0.72 + math.pi * 0.5
+                    n_len = (9.0 + (ni % 3) * 3.5) * sc
+                    nx1 = nx0 + math.cos(ang) * n_len
+                    ny1 = row_y + math.sin(ang) * n_len
+                    col_n = QColor(58, 168, 102, 185) if ni % 3 == 0 else (QColor(22, 92, 54, 195) if ni % 3 == 1 else QColor(220, 240, 250, 115))
+                    p.setPen(QPen(col_n, max(1.0, 1.35 * sc), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    p.drawLine(QPointF(nx0, row_y), QPointF(nx1, ny1))
+                p.restore()
+
+                # Edge needle tufts protruding past silhouette for crisp texture
+                for side in (-1.0, 1.0):
+                    for k in range(4):
+                        kf = 0.35 + k * 0.18
+                        ex = tx + side * half_w * kf
+                        ey = t_top + tier_h * kf
+                        for d_ang in (-0.28, 0.0, 0.28):
+                            ang = (0.35 if side > 0 else math.pi - 0.35) + d_ang
+                            nl = (7.5 + (k % 2) * 2.5) * sc
+                            p.setPen(QPen(QColor(48, 152, 92, 200), max(1.0, 1.2 * sc), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                            p.drawLine(QPointF(ex, ey), QPointF(ex + math.cos(ang) * nl, ey + math.sin(ang) * nl))
+
+                # Soft snow dusting on upper bough ridges
                 snow_cap = QPainterPath()
                 snow_cap.moveTo(tx, t_top)
-                snow_cap.lineTo(tx + half_w * 0.42, t_top + tier_h * 0.42)
-                snow_cap.quadTo(tx, t_top + tier_h * 0.50, tx - half_w * 0.42, t_top + tier_h * 0.42)
+                snow_cap.lineTo(tx + half_w * 0.44, t_top + tier_h * 0.36)
+                snow_cap.quadTo(tx + half_w * 0.16, t_top + tier_h * 0.44, tx, t_top + tier_h * 0.38)
+                snow_cap.quadTo(tx - half_w * 0.16, t_top + tier_h * 0.44, tx - half_w * 0.44, t_top + tier_h * 0.36)
                 snow_cap.closeSubpath()
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(240, 248, 255, 195))
+                p.setBrush(QColor(242, 249, 255, 195))
                 p.drawPath(snow_cap)
 
-            # Garland cord + twinkling bulbs
-            bulbs = [
-                (tx - 10.0, by - 56.0, (255, 215, 90)),
-                (tx + 3.0, by - 52.0, (248, 113, 113)),
-                (tx + 12.0, by - 49.0, (56, 189, 248)),
-                (tx - 16.0, by - 36.0, (52, 211, 153)),
-                (tx - 3.0, by - 32.0, (255, 215, 90)),
-                (tx + 11.0, by - 33.0, (244, 114, 182)),
-                (tx - 21.0, by - 17.0, (248, 113, 113)),
-                (tx - 7.0, by - 13.0, (56, 189, 248)),
-                (tx + 8.0, by - 14.0, (255, 215, 90)),
-                (tx + 21.0, by - 18.0, (52, 211, 153)),
+            # Draped garland strands + twinkling bulbs
+            strand_bulbs = [
+                # Top strand
+                [(tx - 24 * sc, by - 238 * sc, (255, 215, 90)), (tx - 4 * sc, by - 230 * sc, (248, 113, 113)), (tx + 20 * sc, by - 234 * sc, (56, 189, 248))],
+                # Upper-mid strand
+                [(tx - 44 * sc, by - 190 * sc, (52, 211, 153)), (tx - 14 * sc, by - 178 * sc, (255, 215, 90)), (tx + 16 * sc, by - 179 * sc, (244, 114, 182)), (tx + 44 * sc, by - 188 * sc, (56, 189, 248))],
+                # Mid strand
+                [(tx - 62 * sc, by - 140 * sc, (248, 113, 113)), (tx - 26 * sc, by - 126 * sc, (56, 189, 248)), (tx + 8 * sc, by - 124 * sc, (255, 215, 90)), (tx + 40 * sc, by - 130 * sc, (52, 211, 153)), (tx + 62 * sc, by - 141 * sc, (244, 114, 182))],
+                # Lower strand
+                [(tx - 82 * sc, by - 88 * sc, (255, 215, 90)), (tx - 42 * sc, by - 72 * sc, (248, 113, 113)), (tx + 2 * sc, by - 68 * sc, (52, 211, 153)), (tx + 44 * sc, by - 73 * sc, (56, 189, 248)), (tx + 82 * sc, by - 88 * sc, (255, 215, 90))],
+                # Bottom strand
+                [(tx - 96 * sc, by - 36 * sc, (56, 189, 248)), (tx - 48 * sc, by - 22 * sc, (244, 114, 182)), (tx, by - 18 * sc, (255, 215, 90)), (tx + 48 * sc, by - 22 * sc, (248, 113, 113)), (tx + 96 * sc, by - 36 * sc, (52, 211, 153))],
             ]
-            p.setPen(QPen(QColor(30, 50, 40, 180), 1.1))
-            for idx in range(len(bulbs) - 1):
-                if idx in (2, 5):
-                    continue
-                p.drawLine(QPointF(bulbs[idx][0], bulbs[idx][1]), QPointF(bulbs[idx + 1][0], bulbs[idx + 1][1]))
-            p.setPen(Qt.PenStyle.NoPen)
-            for idx, (bx, by_b, rgb) in enumerate(bulbs):
-                tw = 0.52 + 0.48 * math.sin(phase_t * 3.6 + idx * 1.15)
-                b_glow = _get_glow_disc_img(rgb, int(round(85 + 95 * tw)), 14)
-                p.drawImage(QRectF(bx - 7.0, by_b - 7.0, 14.0, 14.0), b_glow)
-                p.setBrush(QColor(rgb[0], rgb[1], rgb[2], int(round(170 + 85 * tw))))
-                p.drawEllipse(QPointF(bx, by_b), 2.3, 2.3)
+            bulb_idx = 0
+            for strand in strand_bulbs:
+                p.setPen(QPen(QColor(22, 42, 32, 200), max(1.2, 1.8 * sc)))
+                for si in range(len(strand) - 1):
+                    p.drawLine(QPointF(strand[si][0], strand[si][1]), QPointF(strand[si + 1][0], strand[si + 1][1]))
+                p.setPen(Qt.PenStyle.NoPen)
+                for bx, by_b, rgb in strand:
+                    tw = 0.50 + 0.50 * math.sin(phase_t * 3.8 + bulb_idx * 1.1)
+                    b_glow = _get_glow_disc_img(rgb, int(round(95 + 115 * tw)), 24)
+                    gs = 24.0 * sc
+                    p.drawImage(QRectF(bx - gs * 0.5, by_b - gs * 0.5, gs, gs), b_glow)
+                    p.setBrush(QColor(rgb[0], rgb[1], rgb[2], int(round(180 + 75 * tw))))
+                    p.drawEllipse(QPointF(bx, by_b), 4.2 * sc, 4.2 * sc)
+                    p.setBrush(QColor(255, 255, 255, int(round(140 * tw))))
+                    p.drawEllipse(QPointF(bx - 1.1 * sc, by_b - 1.1 * sc), 1.3 * sc, 1.3 * sc)
+                    bulb_idx += 1
 
-            # Golden star on top
-            star_y = by - 73.5
-            star_tw = 0.7 + 0.3 * math.sin(phase_t * 2.8)
-            s_glow = _get_glow_disc_img((255, 230, 110), int(round(120 * star_tw)), 20)
-            p.drawImage(QRectF(tx - 10.0, star_y - 10.0, 20.0, 20.0), s_glow)
+            # Glossy ornaments
+            ornaments = [
+                (tx - 18 * sc, by - 208 * sc, QColor(239, 68, 68)),
+                (tx + 24 * sc, by - 160 * sc, QColor(250, 204, 21)),
+                (tx - 38 * sc, by - 110 * sc, QColor(59, 130, 246)),
+                (tx + 18 * sc, by - 102 * sc, QColor(236, 72, 153)),
+                (tx - 62 * sc, by - 58 * sc, QColor(250, 204, 21)),
+                (tx + 58 * sc, by - 56 * sc, QColor(239, 68, 68)),
+                (tx - 16 * sc, by - 46 * sc, QColor(56, 189, 248)),
+            ]
+            for ox, oy, ocol in ornaments:
+                r_o = 5.6 * sc
+                p.setPen(QPen(ocol.darker(145), 1.0))
+                p.setBrush(ocol)
+                p.drawEllipse(QPointF(ox, oy), r_o, r_o)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 255, 255, 165))
+                p.drawEllipse(QPointF(ox - r_o * 0.32, oy - r_o * 0.32), r_o * 0.28, r_o * 0.28)
+
+            # Radiant golden star on top
+            star_y = by - 280.0 * sc
+            star_tw = 0.72 + 0.28 * math.sin(phase_t * 2.8)
+            s_glow = _get_glow_disc_img((255, 232, 115), int(round(145 * star_tw)), 40)
+            s_sz = 46.0 * sc
+            p.drawImage(QRectF(tx - s_sz * 0.5, star_y - s_sz * 0.5, s_sz, s_sz), s_glow)
             star_p = QPainterPath()
             for k in range(10):
                 ang = -math.pi * 0.5 + k * (math.pi / 5.0)
-                rad = 6.2 if k % 2 == 0 else 2.6
+                rad = (15.5 if k % 2 == 0 else 6.8) * sc
                 pt = QPointF(tx + math.cos(ang) * rad, star_y + math.sin(ang) * rad)
                 if k == 0:
                     star_p.moveTo(pt)
                 else:
                     star_p.lineTo(pt)
             star_p.closeSubpath()
+            p.setPen(QPen(QColor(245, 158, 11, 210), 1.2))
             p.setBrush(QColor(253, 224, 71))
             p.drawPath(star_p)
             p.restore()
 
-        # 2. Live Self-Rolling & Self-Decorating Snowman (left-center turf)
-        if snowman_p > 0.01 and core.width() > 260.0:
+        # 2. Large Self-Rolling & Self-Decorating Snowman on Left-Center Background (behind grass)
+        if snowman_p > 0.01 and core.width() > 300.0:
             p.save()
             p.setOpacity(max(0.0, min(1.0, snow_amt)))
-            sm_x = core.left() + 74.0
-            ground_y = turf_y + 1.0
-            r1, r2, r3 = 14.5, 10.8, 7.8
+            sm_x = core.left() + 148.0 * sc
+            ground_y = turf_y + 8.0 * sc
+            r1, r2, r3 = 48.0 * sc, 35.0 * sc, 25.0 * sc
 
             # Stage 1 (0.00..0.30): Bottom snowball rolls in from left
             t1 = _smooth(snowman_p / 0.30)
-            b1_x = (core.left() + 14.0) + (sm_x - (core.left() + 14.0)) * t1
-            b1_r = r1 * (0.45 + 0.55 * t1)
+            b1_x = (core.left() + 26.0 * sc) + (sm_x - (core.left() + 26.0 * sc)) * t1
+            b1_r = r1 * (0.42 + 0.58 * t1)
             b1_y = ground_y - b1_r
             _draw_snowball(b1_x, b1_y, b1_r, rot=t1 * 6.28)
 
             # Stage 2 (0.30..0.56): Middle torso snowball rolls in & hops onto bottom ball
+            torso_y = ground_y - r1 * 1.72 - r2
             if snowman_p > 0.30:
                 t2 = _smooth((snowman_p - 0.30) / 0.26)
-                b2_x = (core.left() + 16.0) + (sm_x - (core.left() + 16.0)) * t2
-                hop2 = math.sin(t2 * math.pi) * 20.0 if t2 < 1.0 else 0.0
-                b2_y = (ground_y - r2) + ((ground_y - r1 * 1.75 - r2) - (ground_y - r2)) * (t2 ** 1.35) - hop2
-                _draw_snowball(b2_x, b2_y, r2 * (0.55 + 0.45 * t2), rot=t2 * 7.5)
+                b2_x = (core.left() + 34.0 * sc) + (sm_x - (core.left() + 34.0 * sc)) * t2
+                hop2 = math.sin(t2 * math.pi) * (54.0 * sc) if t2 < 1.0 else 0.0
+                b2_y = (ground_y - r2) + (torso_y - (ground_y - r2)) * (t2 ** 1.35) - hop2
+                _draw_snowball(b2_x, b2_y, r2 * (0.52 + 0.48 * t2), rot=t2 * 7.5)
 
             # Stage 3 (0.56..0.78): Head snowball rolls in & hops onto torso
-            head_y = ground_y - r1 * 1.75 - r2 * 1.72 - r3
+            head_y = torso_y - r2 * 0.84 - r3
             if snowman_p > 0.56:
                 t3 = _smooth((snowman_p - 0.56) / 0.22)
-                b3_x = (sm_x + 48.0) + (sm_x - (sm_x + 48.0)) * t3
-                hop3 = math.sin(t3 * math.pi) * 24.0 if t3 < 1.0 else 0.0
+                b3_x = (sm_x + 125.0 * sc) + (sm_x - (sm_x + 125.0 * sc)) * t3
+                hop3 = math.sin(t3 * math.pi) * (62.0 * sc) if t3 < 1.0 else 0.0
                 b3_y = (ground_y - r3) + (head_y - (ground_y - r3)) * (t3 ** 1.35) - hop3
-                _draw_snowball(b3_x, b3_y, r3 * (0.65 + 0.35 * t3), rot=-t3 * 8.0)
+                _draw_snowball(b3_x, b3_y, r3 * (0.60 + 0.40 * t3), rot=-t3 * 8.0)
 
             # Stage 4 (0.78..1.00): Self-decorating accessories
-            torso_y = ground_y - r1 * 1.75 - r2
             if snowman_p > 0.78:
-                # Coal eyes, smile & torso buttons
                 f_coal = _smooth((snowman_p - 0.78) / 0.07)
                 p.save()
                 p.setOpacity(f_coal * snow_amt)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(24, 28, 36))
-                p.drawEllipse(QPointF(sm_x - 2.6, head_y - 1.8), 1.3, 1.3)
-                p.drawEllipse(QPointF(sm_x + 2.6, head_y - 1.8), 1.3, 1.3)
+                p.drawEllipse(QPointF(sm_x - 8.2 * sc, head_y - 5.5 * sc), 3.6 * sc, 3.6 * sc)
+                p.drawEllipse(QPointF(sm_x + 8.2 * sc, head_y - 5.5 * sc), 3.6 * sc, 3.6 * sc)
+                p.setBrush(QColor(255, 255, 255, 190))
+                p.drawEllipse(QPointF(sm_x - 9.2 * sc, head_y - 6.6 * sc), 1.1 * sc, 1.1 * sc)
+                p.drawEllipse(QPointF(sm_x + 7.2 * sc, head_y - 6.6 * sc), 1.1 * sc, 1.1 * sc)
+                p.setBrush(QColor(24, 28, 36))
                 for m in range(-2, 3):
-                    p.drawEllipse(QPointF(sm_x + m * 1.5, head_y + 2.8 - abs(m) * 0.35), 0.75, 0.75)
-                for by_off in (-3.2, 0.8, 4.8):
-                    p.drawEllipse(QPointF(sm_x, torso_y + by_off), 1.35, 1.35)
+                    p.drawEllipse(QPointF(sm_x + m * 4.6 * sc, head_y + 8.8 * sc - abs(m) * 1.1 * sc), 2.1 * sc, 2.1 * sc)
+                for by_off in (-11.0 * sc, 2.0 * sc, 15.0 * sc):
+                    p.drawEllipse(QPointF(sm_x, torso_y + by_off), 4.0 * sc, 4.0 * sc)
                 p.restore()
 
             if snowman_p > 0.83:
-                # Orange carrot nose
                 f_nose = _smooth((snowman_p - 0.83) / 0.06)
-                nose_len = 7.5 * f_nose
+                nose_len = 24.0 * sc * f_nose
                 nose = QPainterPath()
-                nose.moveTo(sm_x, head_y - 0.5)
-                nose.lineTo(sm_x + nose_len, head_y + 0.8)
-                nose.lineTo(sm_x, head_y + 2.0)
+                nose.moveTo(sm_x, head_y - 2.2 * sc)
+                nose.lineTo(sm_x + nose_len, head_y + 2.5 * sc)
+                nose.lineTo(sm_x, head_y + 6.2 * sc)
                 nose.closeSubpath()
-                p.setPen(Qt.PenStyle.NoPen)
+                p.setPen(QPen(QColor(194, 65, 12, 180), 1.0))
                 p.setBrush(QColor(249, 115, 22))
                 p.drawPath(nose)
 
             if snowman_p > 0.87:
-                # Twig arms (gentle happy wave)
                 f_arms = _smooth((snowman_p - 0.87) / 0.06)
-                wave = math.sin(phase_t * 2.4) * 2.2 * f_arms
-                p.setPen(QPen(QColor(110, 72, 46), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.drawLine(QPointF(sm_x - r2 + 1.0, torso_y - 1.0), QPointF(sm_x - r2 - 10.0 * f_arms, torso_y - 6.0 * f_arms + wave))
-                p.drawLine(QPointF(sm_x + r2 - 1.0, torso_y - 1.0), QPointF(sm_x + r2 + 10.0 * f_arms, torso_y - 6.0 * f_arms - wave))
+                wave = math.sin(phase_t * 2.4) * (6.5 * sc) * f_arms
+                p.setPen(QPen(QColor(102, 66, 42), max(2.2, 4.5 * sc), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                lx0, ly0 = sm_x - r2 + 3.0 * sc, torso_y - 3.0 * sc
+                lx1, ly1 = sm_x - r2 - 34.0 * sc * f_arms, torso_y - 20.0 * sc * f_arms + wave
+                rx0, ry0 = sm_x + r2 - 3.0 * sc, torso_y - 3.0 * sc
+                rx1, ry1 = sm_x + r2 + 34.0 * sc * f_arms, torso_y - 20.0 * sc * f_arms - wave
+                p.drawLine(QPointF(lx0, ly0), QPointF(lx1, ly1))
+                p.drawLine(QPointF(rx0, ry0), QPointF(rx1, ry1))
+                # Little branch fingers
+                p.setPen(QPen(QColor(102, 66, 42), max(1.5, 2.6 * sc), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(lx1 + 8.0 * sc, ly1 + 4.0 * sc), QPointF(lx1 - 4.0 * sc, ly1 - 9.0 * sc))
+                p.drawLine(QPointF(rx1 - 8.0 * sc, ry1 + 4.0 * sc), QPointF(rx1 + 4.0 * sc, ry1 - 9.0 * sc))
 
             if snowman_p > 0.91:
-                # Crimson winter scarf
                 f_scarf = _smooth((snowman_p - 0.91) / 0.05)
                 neck_y = head_y + r3 * 0.78
+                p.setPen(QPen(QColor(153, 27, 27, int(round(200 * f_scarf))), 1.0))
+                p.setBrush(QColor(220, 38, 38, int(round(245 * f_scarf))))
+                p.drawRoundedRect(QRectF(sm_x - 25.0 * sc * f_scarf, neck_y - 6.0 * sc, 50.0 * sc * f_scarf, 12.5 * sc), 5.0 * sc, 5.0 * sc)
+                p.drawRoundedRect(QRectF(sm_x + 7.5 * sc, neck_y + 3.0 * sc, 11.5 * sc, 27.0 * sc * f_scarf), 4.0 * sc, 4.0 * sc)
+                # Gold stripe on scarf
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(220, 38, 38, int(round(240 * f_scarf))))
-                p.drawRoundedRect(QRectF(sm_x - 8.2 * f_scarf, neck_y - 2.0, 16.4 * f_scarf, 4.2), 2.0, 2.0)
-                p.drawRoundedRect(QRectF(sm_x + 2.5, neck_y + 1.0, 3.6, 8.5 * f_scarf), 1.5, 1.5)
+                p.setBrush(QColor(250, 204, 21, int(round(215 * f_scarf))))
+                p.drawRect(QRectF(sm_x + 7.5 * sc, neck_y + 22.0 * sc * f_scarf, 11.5 * sc, 3.0 * sc))
 
             if snowman_p > 0.95:
-                # Cozy dark top hat with red ribbon dropping onto head
                 f_hat = _smooth((snowman_p - 0.95) / 0.05)
-                hat_y = head_y - r3 + 1.2 - (1.0 - f_hat) * 14.0
+                hat_y = head_y - r3 + 3.0 * sc - (1.0 - f_hat) * (40.0 * sc)
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(30, 34, 44, int(round(245 * f_hat))))
-                p.drawRoundedRect(QRectF(sm_x - 9.0, hat_y - 2.0, 18.0, 3.0), 1.5, 1.5)
-                p.drawRoundedRect(QRectF(sm_x - 5.6, hat_y - 10.5, 11.2, 9.0), 2.0, 2.0)
+                p.setBrush(QColor(26, 30, 40, int(round(248 * f_hat))))
+                p.drawRoundedRect(QRectF(sm_x - 28.0 * sc, hat_y - 6.0 * sc, 56.0 * sc, 9.0 * sc), 4.0 * sc, 4.0 * sc)
+                p.drawRoundedRect(QRectF(sm_x - 18.0 * sc, hat_y - 32.0 * sc, 36.0 * sc, 27.0 * sc), 4.5 * sc, 4.5 * sc)
                 p.setBrush(QColor(220, 38, 38, int(round(245 * f_hat))))
-                p.drawRect(QRectF(sm_x - 5.6, hat_y - 4.0, 11.2, 2.0))
+                p.drawRect(QRectF(sm_x - 18.0 * sc, hat_y - 12.0 * sc, 36.0 * sc, 5.5 * sc))
+                # Snow dusting on hat brim
+                p.setBrush(QColor(242, 249, 255, int(round(210 * f_hat))))
+                p.drawRoundedRect(QRectF(sm_x - 16.0 * sc, hat_y - 33.5 * sc, 32.0 * sc, 4.0 * sc), 2.0 * sc, 2.0 * sc)
 
             p.restore()
