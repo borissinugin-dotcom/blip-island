@@ -116,26 +116,26 @@ def _get_crystal_drop_pixmap(rx_d: float, ry_d: float, scale: float, flash_hi: f
         axis=-1,
     ).astype(np.float32)
 
-    # Pure crystal clear interior (no warping/haze, ~88% see-through!) + crisp 3D Fresnel edges + speculars
-    rim_t = np.clip((r - 0.64) / 0.36, 0.0, 1.0)
-    upper_arc = np.clip(0.86 - 0.64 * v - 0.18 * u, 0.0, 1.0)
-    dark_rim_a = (rim_t ** 1.35) * upper_arc * 0.52
+    # Crisp 3D Fresnel edges + brighter bottom caustic meniscus + sharp specular catchlight
+    rim_t = np.clip((r - 0.62) / 0.38, 0.0, 1.0)
+    upper_arc = np.clip(0.88 - 0.64 * v - 0.18 * u, 0.0, 1.0)
+    dark_rim_a = (rim_t ** 1.30) * upper_arc * 0.58
 
-    low_right = np.clip((u * 0.42 + v * 0.92 - 0.10) / 0.92, 0.0, 1.0)
-    bright_rim = np.exp(-((r - 0.89) ** 2) / 0.011) * (low_right ** 1.35) * 0.56
+    low_right = np.clip((u * 0.42 + v * 0.92 - 0.08) / 0.92, 0.0, 1.0)
+    bright_rim = np.exp(-((r - 0.89) ** 2) / 0.009) * (low_right ** 1.25) * 0.68
 
     # Bottom internal caustic meniscus arc (gives palpable 3D liquid dome bulge)
-    bot_t = np.clip((v - 0.10) / 0.90, 0.0, 1.0)
-    caust_arc = np.clip((r - 0.52) / 0.38, 0.0, 1.0) * (1.0 - np.clip((r - 0.94) / 0.08, 0.0, 1.0))
-    caust = caust_arc * (bot_t ** 1.38) * np.exp(-ux * ux * 1.35) * (0.36 + 0.22 * (flash_q / 3.0))
+    bot_t = np.clip((v - 0.08) / 0.92, 0.0, 1.0)
+    caust_arc = np.clip((r - 0.50) / 0.40, 0.0, 1.0) * (1.0 - np.clip((r - 0.94) / 0.08, 0.0, 1.0))
+    caust = caust_arc * (bot_t ** 1.32) * np.exp(-ux * ux * 1.25) * (0.44 + 0.24 * (flash_q / 3.0))
 
     # Glossy upper-left sky catchlight + bottom-right bounce spark
     dx_hi = (u + 0.34) * 0.85 - (v + 0.35) * 0.52
     dy_hi = (u + 0.34) * 0.52 + (v + 0.35) * 0.85
-    sig_hi = max(0.042, 0.14 / max(1.0, float(rx_i) * 0.25))
-    spec_main = np.exp(-(dx_hi * dx_hi * 0.65 + dy_hi * dy_hi * 2.1) / sig_hi) * 0.94
-    spec_halo = 0.22 * np.exp(-((u + 0.30) ** 2 + (v + 0.31) ** 2) / (sig_hi * 2.4))
-    spec_bounce = 0.54 * np.exp(-((u - 0.26) ** 2 + (v - 0.44) ** 2) / (sig_hi * 1.15))
+    sig_hi = max(0.038, 0.125 / max(1.0, float(rx_i) * 0.25))
+    spec_main = np.exp(-(dx_hi * dx_hi * 0.65 + dy_hi * dy_hi * 2.1) / sig_hi) * 0.98
+    spec_halo = 0.24 * np.exp(-((u + 0.30) ** 2 + (v + 0.31) ** 2) / (sig_hi * 2.2))
+    spec_bounce = 0.62 * np.exp(-((u - 0.26) ** 2 + (v - 0.44) ** 2) / (sig_hi * 1.10))
 
     spec_hi = np.clip(spec_main + spec_halo + spec_bounce + bright_rim + caust, 0.0, 1.0)
 
@@ -193,7 +193,7 @@ class _SlidingDrop:
     next_pause_t: float
     edge_stall_t: float
     life_alpha: float
-    trail: deque = field(default_factory=lambda: deque(maxlen=76))
+    trail: deque = field(default_factory=lambda: deque(maxlen=42))
     last_trail_y: float = -999.0
     next_pinch_dist: float = 11.0
 
@@ -505,11 +505,11 @@ class CardRainSystem:
             ox, oy = cr.left(), cr.top()
 
             # ------------------------------------------------------------------
-            # Pass 1: Single-path-per-tier prominent glistening wet wakes
+            # Pass 1: 2-tier batched glistening wet wakes (optimized for 120 FPS)
             # ------------------------------------------------------------------
-            body_paths: list[QPainterPath | None] = [None, None, None]
-            tier_counts = [0, 0, 0]
-            tier_w_sum = [0.0, 0.0, 0.0]
+            body_paths: list[QPainterPath | None] = [None, None]
+            tier_counts = [0, 0]
+            tier_w_sum = [0.0, 0.0]
 
             for d in fobj.drops:
                 pts = d.trail
@@ -525,9 +525,9 @@ class CardRainSystem:
                     if age >= trail_max_age:
                         continue
                     fade = ((1.0 - age / trail_max_age) ** 1.18) * la
-                    if fade <= 0.03:
+                    if fade <= 0.04:
                         continue
-                    ti = 0 if fade < tier_bounds[0] else (1 if fade < tier_bounds[1] else 2)
+                    ti = 0 if fade < 0.48 else 1
                     w_tr = max(0.95, (hw0 + hw1) * 1.15 * fade + 0.55)
                     tier_w_sum[ti] += w_tr
                     tier_counts[ti] += 1
@@ -544,22 +544,17 @@ class CardRainSystem:
             if any(tier_counts):
                 p.setBrush(_BRUSH_NONE)
                 p_set_op(master_opacity)
-                tier_fades = (0.24, 0.56, 0.92)
-                for ti in range(3):
+                tier_fades = (0.34, 0.88)
+                for ti in range(2):
                     bp = body_paths[ti]
                     if bp is None or tier_counts[ti] == 0:
                         continue
                     f_t = tier_fades[ti]
                     w_t = tier_w_sum[ti] / tier_counts[ti]
-                    # Translucent glassy wake: faint meniscus rim + clear water film + crisp specular edge thread
-                    p_set_pen(_get_trail_pen(6, 12, 24, int(round(42 * f_t)), w_t + 1.10))
+                    p_set_pen(_get_trail_pen(168, 216, 255, int(round((40 + spec_flash * 0.55) * f_t)), max(0.90, w_t * 0.90)))
                     p_draw_path(bp)
-                    p_set_pen(_get_trail_pen(172, 218, 255, int(round((34 + spec_flash * 0.55) * f_t)), max(0.85, w_t * 0.86)))
+                    p_set_pen(_get_trail_pen(244, 251, 255, int(round((152 + spec_flash) * f_t)), max(0.50, w_t * 0.36)))
                     p_draw_path(bp)
-                    p.translate(-0.55, 0.0)
-                    p_set_pen(_get_trail_pen(242, 250, 255, int(round((145 + spec_flash) * f_t)), max(0.48, w_t * 0.34)))
-                    p_draw_path(bp)
-                    p.translate(0.55, 0.0)
 
             # ------------------------------------------------------------------
             # Pass 2: Pre-cached crystal micro-beads along condensation & wakes
