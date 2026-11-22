@@ -15,7 +15,7 @@ from pathlib import Path
 from borh_island.core.security import decrypt_secret, encrypt_secret
 
 APP_PRODUCT_NAME = "Blip"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.9"
 WORKER_BASE_URL = "https://blip-license-worker.blip-borh.workers.dev"
 ED25519_PUBLIC_KEY_B64U = "lue3Ld1hP5dYrUlXjrDRxmv6UWKl_vKAOjzmHKWJH8w"
 
@@ -383,21 +383,69 @@ class LicenseManager:
         if (self.project_dir / ".git").exists() or repo_file.exists():
             try:
                 repo_file.write_text(text + "\n", encoding="utf-8")
-                if push_github and (self.project_dir / ".git").exists():
-                    import subprocess
+            except Exception:
+                pass
 
-                    subprocess.run(["git", "add", "code_policies.json"], cwd=str(self.project_dir), check=False, capture_output=True)
+        gh_msg = "Локально сохранено"
+        if push_github:
+            import shutil
+            import subprocess
+
+            no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            gh_bin = shutil.which("gh") or r"C:\Program Files\GitHub CLI\gh.exe"
+            pushed = False
+            if gh_bin and Path(gh_bin).exists():
+                try:
+                    get_res = subprocess.run(
+                        [gh_bin, "api", "repos/borissinugin-dotcom/blip-island/contents/code_policies.json"],
+                        capture_output=True,
+                        text=True,
+                        creationflags=no_win,
+                        timeout=12,
+                    )
+                    sha = ""
+                    if get_res.returncode == 0:
+                        sha = str(json.loads(get_res.stdout).get("sha") or "")
+                    b64_content = base64.b64encode((text + "\n").encode("utf-8")).decode("ascii")
+                    cmd = [
+                        gh_bin,
+                        "api",
+                        "-X",
+                        "PUT",
+                        "repos/borissinugin-dotcom/blip-island/contents/code_policies.json",
+                        "-f",
+                        "message=Update code_policies.json",
+                        "-f",
+                        f"content={b64_content}",
+                    ]
+                    if sha:
+                        cmd.extend(["-f", f"sha={sha}"])
+                    put_res = subprocess.run(cmd, capture_output=True, text=True, creationflags=no_win, timeout=15)
+                    if put_res.returncode == 0:
+                        pushed = True
+                        gh_msg = "Применено и обновлено на GitHub!"
+                    else:
+                        gh_msg = f"Ошибка GitHub API: {(put_res.stderr or put_res.stdout).strip()[:80]}"
+                except Exception as exc:
+                    gh_msg = f"Ошибка GitHub API: {exc}"
+            if not pushed and (self.project_dir / ".git").exists():
+                try:
+                    subprocess.run(["git", "add", "code_policies.json"], cwd=str(self.project_dir), check=True, capture_output=True, creationflags=no_win)
                     subprocess.run(
                         ["git", "-c", "user.name=Borh", "-c", "user.email=borh@local", "commit", "-m", "Update code_policies.json"],
                         cwd=str(self.project_dir),
                         check=False,
                         capture_output=True,
+                        creationflags=no_win,
                     )
-                    subprocess.run(["git", "push", "origin", "main"], cwd=str(self.project_dir), check=False, capture_output=True)
-            except Exception:
-                pass
+                    pr = subprocess.run(["git", "push", "origin", "main"], cwd=str(self.project_dir), capture_output=True, text=True, creationflags=no_win, timeout=20)
+                    if pr.returncode == 0:
+                        pushed = True
+                        gh_msg = "Применено и обновлено на GitHub!"
+                except Exception:
+                    pass
         self.invalidate_cache()
-        return True, "Политика кода обновлена"
+        return True, gh_msg
 
     def invalidate_cache(self) -> None:
         self._cached_status = None

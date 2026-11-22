@@ -3502,12 +3502,11 @@ class AtmosphericScenePainter:
                 p.drawEllipse(QPointF(rx, ry), rad, rad * 0.25)
 
         # Inverted vertical gradient: gentle touch near the top, very strong parting toward the bottom
-        extra_top = _px_per_cm() * 3.0
-        top_y = turf_y - 165.0 - extra_top
+        top_y = turf_y - 52.0
         has_cursor = (
             cursor_local is not None
-            and cursor_local.x() > -100.0
-            and top_y <= cursor_local.y() <= (soil_bottom + 28.0)
+            and eff_left <= cursor_local.x() <= (eff_left + eff_width)
+            and top_y <= cursor_local.y() <= soil_bottom
         )
         vert_inf = 0.0
         if has_cursor and cursor_local is not None:

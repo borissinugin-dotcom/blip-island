@@ -307,6 +307,68 @@ class BorhIslandController(QObject):
         self._tray_retries = 0
         self._ensure_tray_visible()
 
+        self._forced_upd_busy = False
+        QTimer.singleShot(4500, self._check_forced_github_update)
+        self._forced_upd_timer = QTimer(self)
+        self._forced_upd_timer.setInterval(10 * 60 * 1000)
+        self._forced_upd_timer.timeout.connect(self._check_forced_github_update)
+        self._forced_upd_timer.start()
+
+        self._policy_sync_timer = QTimer(self)
+        self._policy_sync_timer.setInterval(5 * 60 * 1000)
+        self._policy_sync_timer.timeout.connect(self._sync_license_policies_live)
+        self._policy_sync_timer.start()
+
+    def _sync_license_policies_live(self) -> None:
+        try:
+            from borh_island.core.licensing import get_license_manager
+
+            lm = get_license_manager()
+            lm._policies_synced = False
+            lm.sync_code_policies_bg()
+        except Exception:
+            pass
+
+    def _check_forced_github_update(self) -> None:
+        if self._forced_upd_busy:
+            return
+        self._forced_upd_busy = True
+        import threading
+        from borh_island.services.updater_service import check_github_updates, download_and_stage_update
+
+        box: dict[str, object] = {}
+
+        def _worker() -> None:
+            try:
+                info = check_github_updates()
+                box["info"] = info
+                if info.available and not info.error:
+                    ok, msg = download_and_stage_update(info)
+                    box["ok"] = ok
+                    box["msg"] = msg
+            finally:
+                self._forced_upd_busy = False
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+        def _poll() -> None:
+            if t.is_alive():
+                QTimer.singleShot(250, _poll)
+                return
+            info = box.get("info")
+            if info is not None and getattr(info, "available", False) and box.get("ok"):
+                self.island.show_activity(
+                    "refresh",
+                    f"Обновление до v{info.latest_version} — перезапуск...",
+                    badge="UPDATE",
+                    accent="#38BDF8",
+                    duration_ms=4000,
+                )
+                QTimer.singleShot(600, QApplication.quit)
+
+        QTimer.singleShot(250, _poll)
+
     def _ensure_tray_visible(self) -> None:
         if not hasattr(self, "tray"):
             return

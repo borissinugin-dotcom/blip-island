@@ -6,8 +6,8 @@ import os
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QGuiApplication, QPixmap
+from PyQt6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -89,6 +89,10 @@ class SettingsWindow(QDialog):
         self._build_developers_tab()
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
+
+        self.live_preview_box = _SettingsLivePreviewWidget(config_mgr)
+        root.addWidget(self.live_preview_box)
+        self.live_preview_requested.connect(self.live_preview_box.apply_patch)
 
         footer = QHBoxLayout()
         rst_btn = QPushButton("Перезагрузить Blip" if config_mgr.config.language == "ru" else "Reload Blip")
@@ -289,6 +293,34 @@ class SettingsWindow(QDialog):
         self._bind_hover_preview(self.pill_mode_combo, {"pill_mode": "miniplayer"})
         self._bind_hover_preview(self.chk_eq, {"edge_equalizer": True})
         self._bind_hover_preview(self.chk_liquid_drop, {"liquid_drop": True})
+
+        self.player_style_combo.currentIndexChanged.connect(
+            lambda _i=0: self.live_preview_requested.emit({"player_card_style": self.player_style_combo.currentData()})
+        )
+        self.pill_mode_combo.currentIndexChanged.connect(
+            lambda _i=0: self.live_preview_requested.emit({"pill_mode": self.pill_mode_combo.currentData()})
+        )
+        self.theme_combo.currentIndexChanged.connect(
+            lambda _i=0: self.live_preview_requested.emit({"theme": self.theme_combo.currentData()})
+        )
+        self.appearance_combo.currentIndexChanged.connect(
+            lambda _i=0: self.live_preview_requested.emit({"island_appearance_mode": self.appearance_combo.currentData()})
+        )
+        self.scale_spin.valueChanged.connect(
+            lambda v: self.live_preview_requested.emit({"scale": float(v) / 100.0})
+        )
+        self.op_col_spin.valueChanged.connect(
+            lambda v: self.live_preview_requested.emit({"collapsed_opacity": float(v) / 100.0})
+        )
+        self.op_exp_spin.valueChanged.connect(
+            lambda v: self.live_preview_requested.emit({"expanded_opacity": float(v) / 100.0})
+        )
+        self.chk_eq.toggled.connect(
+            lambda checked: self.live_preview_requested.emit({"edge_equalizer": bool(checked)})
+        )
+        self.chk_liquid_drop.toggled.connect(
+            lambda checked: self.live_preview_requested.emit({"liquid_drop": bool(checked)})
+        )
 
         form.addRow("", self.chk_autostart)
         form.addRow("Language:", self.lang_combo)
@@ -1075,3 +1107,185 @@ class SettingsWindow(QDialog):
         self._saved = True
         self.config_applied.emit()
         self.accept()
+
+
+class _MiniPreviewCanvas(QWidget):
+    """Lightweight live canvas rendering a miniature island pill & player card."""
+
+    def __init__(self, state: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._state = dict(state)
+        self.setFixedHeight(86)
+        self.setMinimumWidth(280)
+
+    def update_state(self, state: dict) -> None:
+        self._state = dict(state)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        st = self._state
+
+        theme = str(st.get("theme", "dark") or "dark").lower()
+        is_light = theme == "light"
+        accent = QColor(str(st.get("accent_color", "#3B82F6") or "#3B82F6"))
+        if not accent.isValid():
+            accent = QColor("#3B82F6")
+
+        scale = max(0.80, min(1.35, float(st.get("scale", 1.0) or 1.0)))
+        op_col = max(0.25, min(1.0, float(st.get("collapsed_opacity", 0.92) or 0.92)))
+        op_exp = max(0.35, min(1.0, float(st.get("expanded_opacity", 0.96) or 0.96)))
+        player_style = str(st.get("player_card_style", "mirror") or "mirror").lower()
+        pill_mode = str(st.get("pill_mode", "miniplayer") or "miniplayer").lower()
+        app_mode = str(st.get("island_appearance_mode", "weather") or "weather").lower()
+        eq_on = bool(st.get("edge_equalizer", True))
+
+        # Subtle backdrop grid/frame
+        bg_rect = QRectF(1.0, 1.0, w - 2.0, h - 2.0)
+        p.setPen(QPen(QColor(255, 255, 255, 26) if not is_light else QColor(0, 0, 0, 26), 1.0))
+        p.setBrush(QColor("#0B1020") if not is_light else QColor("#E2E8F0"))
+        p.drawRoundedRect(bg_rect, 10.0, 10.0)
+
+        # Left: miniature collapsed pill
+        pill_w = min(130.0, 96.0 * (0.75 + 0.25 * scale))
+        pill_h = min(30.0, 22.0 * (0.75 + 0.25 * scale))
+        pill_rect = QRectF(14.0, (h - pill_h) * 0.5, pill_w, pill_h)
+        pill_bg = QColor("#0F172A" if not is_light else "#FFFFFF")
+        if app_mode == "color":
+            pill_bg = QColor(accent.darker(180) if not is_light else accent.lighter(165))
+        pill_bg.setAlphaF(op_col)
+
+        p.setBrush(pill_bg)
+        p.setPen(QPen(accent if eq_on else QColor(255, 255, 255, 45), 1.5 if eq_on else 1.0))
+        p.drawRoundedRect(pill_rect, pill_h * 0.5, pill_h * 0.5)
+
+        p.setPen(QColor("#F8FAFC" if not is_light else "#0F172A"))
+        p.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
+        pill_txt = "♪ Blip" if pill_mode == "compact" else ("Track…" if pill_mode == "track" else "▶ 01:24")
+        p.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, pill_txt)
+
+        # Right: miniature expanded player card
+        card_x = pill_rect.right() + 14.0
+        card_w = max(120.0, w - card_x - 14.0)
+        card_h = min(68.0, 52.0 * (0.78 + 0.22 * scale))
+        card_rect = QRectF(card_x, (h - card_h) * 0.5, card_w, card_h)
+
+        card_path = QPainterPath()
+        card_path.addRoundedRect(card_rect, 14.0, 14.0)
+        p.save()
+        p.setClipPath(card_path)
+
+        if player_style == "fill":
+            grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomRight())
+            c1 = QColor(accent)
+            c1.setAlphaF(op_exp)
+            c2 = QColor(accent.darker(175))
+            c2.setAlphaF(op_exp)
+            grad.setColorAt(0.0, c1)
+            grad.setColorAt(1.0, c2)
+            p.fillPath(card_path, grad)
+        elif player_style == "compact":
+            c_bg = QColor("#111827" if not is_light else "#F8FAFC")
+            c_bg.setAlphaF(op_exp)
+            p.fillPath(card_path, c_bg)
+        else:
+            # mirror
+            grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomRight())
+            c1 = QColor("#1E293B" if not is_light else "#FFFFFF")
+            c1.setAlphaF(op_exp)
+            c2 = QColor(accent.darker(190) if not is_light else accent.lighter(170))
+            c2.setAlphaF(op_exp)
+            grad.setColorAt(0.0, c1)
+            grad.setColorAt(1.0, c2)
+            p.fillPath(card_path, grad)
+
+        # Mini cover art square
+        cov_sz = card_h - 16.0
+        cov_rect = QRectF(card_rect.left() + 8.0, card_rect.top() + 8.0, cov_sz, cov_sz)
+        p.setBrush(accent)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(cov_rect, 7.0, 7.0)
+
+        # Mini track text
+        txt_x = cov_rect.right() + 8.0
+        txt_col = QColor("#FFFFFF" if (not is_light or player_style == "fill") else "#0F172A")
+        p.setPen(txt_col)
+        p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        p.drawText(QRectF(txt_x, card_rect.top() + 9.0, card_rect.right() - txt_x - 8.0, 16.0), Qt.AlignmentFlag.AlignVCenter, f"Style: {player_style.title()}")
+        sub_col = QColor(txt_col)
+        sub_col.setAlpha(185)
+        p.setPen(sub_col)
+        p.setFont(QFont("Segoe UI", 7))
+        p.drawText(
+            QRectF(txt_x, card_rect.top() + 26.0, card_rect.right() - txt_x - 8.0, 14.0),
+            Qt.AlignmentFlag.AlignVCenter,
+            f"Scale {int(round(scale * 100))}% • Op {int(round(op_col * 100))}%/{int(round(op_exp * 100))}%",
+        )
+        p.restore()
+
+        p.setPen(QPen(accent if eq_on else QColor(255, 255, 255, 45), 1.4 if eq_on else 1.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(card_rect, 14.0, 14.0)
+
+
+class _SettingsLivePreviewWidget(QFrame):
+    """Footer card inside SettingsWindow showing live visual changes before saving."""
+
+    def __init__(self, config_mgr: ConfigManager, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("Card")
+        cfg = config_mgr.config
+        self._base_state = {
+            "theme": getattr(cfg, "theme", "dark"),
+            "accent_color": getattr(cfg, "accent_color", "#3B82F6"),
+            "scale": getattr(cfg, "scale", 1.0),
+            "collapsed_opacity": getattr(cfg, "collapsed_opacity", 0.92),
+            "expanded_opacity": getattr(cfg, "expanded_opacity", 0.96),
+            "player_card_style": getattr(cfg, "player_card_style", "mirror"),
+            "pill_mode": getattr(cfg, "pill_mode", "miniplayer"),
+            "island_appearance_mode": getattr(cfg, "island_appearance_mode", "weather"),
+            "edge_equalizer": getattr(cfg, "edge_equalizer", True),
+            "liquid_drop": getattr(cfg, "liquid_drop", True),
+        }
+        self._cur_state = dict(self._base_state)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        title = QLabel("👁 Живой предпросмотр изменений" if getattr(cfg, "language", "ru") == "ru" else "👁 Live Visual Preview")
+        title.setStyleSheet("font-weight: 700; font-size: 12px;")
+        self._info_lbl = QLabel("")
+        self._info_lbl.setObjectName("Muted")
+        self._info_lbl.setStyleSheet("font-size: 11px;")
+        hdr.addWidget(title)
+        hdr.addStretch(1)
+        hdr.addWidget(self._info_lbl)
+        lay.addLayout(hdr)
+
+        self._canvas = _MiniPreviewCanvas(self._cur_state, self)
+        lay.addWidget(self._canvas)
+        self._refresh_label()
+
+    def apply_patch(self, patch: dict) -> None:
+        if not patch:
+            self._cur_state = dict(self._base_state)
+        else:
+            self._cur_state.update(patch)
+        self._canvas.update_state(self._cur_state)
+        self._refresh_label()
+
+    def _refresh_label(self) -> None:
+        st = self._cur_state
+        self._info_lbl.setText(
+            f"Плеер: {st.get('player_card_style', 'mirror')} • "
+            f"Пилюля: {st.get('pill_mode', 'miniplayer')} • "
+            f"Масштаб: {int(round(float(st.get('scale', 1.0)) * 100))}% • "
+            f"Прозрачность: {int(round(float(st.get('collapsed_opacity', 0.92)) * 100))}% / {int(round(float(st.get('expanded_opacity', 0.96)) * 100))}%"
+        )
+

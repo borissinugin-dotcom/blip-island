@@ -1643,14 +1643,16 @@ class IslandWindow(QWidget):
         screens = QGuiApplication.screens()
         scr = screens[cfg.monitor_index] if 0 <= cfg.monitor_index < len(screens) else QGuiApplication.primaryScreen()
         geo = scr.geometry() if scr else QRect(0, 0, 1920, 1080)
-        scale = max(0.8, min(2.0, float(cfg.scale)))
+        user_scale = max(0.8, min(2.0, float(cfg.scale)))
+        auto_fit = min(1.0, float(geo.width()) / 1680.0, float(geo.height()) / 960.0)
+        scale = max(0.68, min(2.0, user_scale * auto_fit))
 
         if self._expanded:
             tall = bool(hasattr(self.panel, "wants_tall_island") and self.panel.wants_tall_island())
             core_w = int(round((1120 if tall else 980) * scale))
             core_h = int(round((700 if tall else 568) * scale))
-            core_w = min(core_w, max(360, geo.width() - 2 * _DROP_PAD_X - 24))
-            core_h = min(core_h, max(320, geo.height() - _DROP_PAD_TOP - _DROP_PAD_BOTTOM - 32))
+            core_w = min(core_w, max(360, int(geo.width() * 0.84) - 2 * _DROP_PAD_X))
+            core_h = min(core_h, max(320, int(geo.height() * 0.74) - _DROP_PAD_TOP - _DROP_PAD_BOTTOM))
         elif self._music_strip_open and self._has_media:
             core_w = min(int(round(690 * scale)), max(360, geo.width() - 2 * _DROP_PAD_X - 24))
             core_h = int(round(134 * scale))
@@ -2751,8 +2753,8 @@ class IslandWindow(QWidget):
 
         near_grass = (
             self._expanded
-            and core.left() - 36.0 <= local.x() <= core.right() + 36.0
-            and core.bottom() - 125.0 <= local.y() <= core.bottom() + 45.0
+            and core.left() <= local.x() <= core.right()
+            and core.bottom() - 50.0 <= local.y() <= core.bottom()
         )
         near_sky = (
             self._expanded
