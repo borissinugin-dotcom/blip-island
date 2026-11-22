@@ -4027,6 +4027,7 @@ class AtmosphericScenePainter:
             core,
             turf_y=core.bottom() - 5.0,
             phase_t=phase_t,
+            wind_ms=wind_ms,
             light_w=light_w,
             rain_amt=rain_vis,
             snow_amt=snow_vis,
@@ -4069,6 +4070,7 @@ class AtmosphericScenePainter:
         *,
         turf_y: float,
         phase_t: float,
+        wind_ms: float = 3.0,
         light_w: float,
         rain_amt: float,
         snow_amt: float,
@@ -4076,29 +4078,96 @@ class AtmosphericScenePainter:
         snowman_p: float,
         tree_vis: float,
     ) -> None:
-        """Paint background props behind the grass: old log cabin, seasonal trees (leafy -> New Year pine), and rolling snowman."""
+        """Paint background props behind the grass: old log cabin, seasonal wind-reactive trees, and rolling snowman."""
         if core.width() <= 300.0:
             return
 
+        def _clamp01(v: float) -> float:
+            return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
+        def _smooth(v: float) -> float:
+            t = _clamp01(v)
+            return t * t * (3.0 - 2.0 * t)
+
         sc = max(0.55, min(1.15, float(core.height()) / 560.0))
+        wind_force = max(0.0, min(1.0, abs(float(wind_ms)) / 20.0))
+        wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
+
+        # -1. Distant misty forest silhouette along the horizon behind the cabin & foreground trees
+        p.save()
+        for layer_idx, (l_scale, l_alpha, y_off) in enumerate(((0.62, 85, 6.0), (0.85, 130, 10.0))):
+            if layer_idx == 0:
+                f_col = QColor(
+                    int(round(36 * (1.0 - light_w * 0.65) + 45 * snow_amt)),
+                    int(round(68 * (1.0 - light_w * 0.62) + 40 * snow_amt)),
+                    int(round(58 * (1.0 - light_w * 0.48) + 48 * snow_amt)),
+                    l_alpha,
+                )
+            else:
+                f_col = QColor(
+                    int(round(24 * (1.0 - light_w * 0.62) + 32 * snow_amt)),
+                    int(round(56 * (1.0 - light_w * 0.60) + 30 * snow_amt)),
+                    int(round(42 * (1.0 - light_w * 0.45) + 36 * snow_amt)),
+                    l_alpha,
+                )
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(f_col)
+            step_f = 22.0 * sc * l_scale
+            n_trees_bg = int(core.width() / max(8.0, step_f)) + 2
+            for fi in range(n_trees_bg):
+                fx = core.left() + fi * step_f + ((fi * 17) % 7) * 2.0 * sc
+                fh = (44.0 + ((fi * 31 + layer_idx * 19) % 34)) * sc * l_scale
+                fw = (16.0 + ((fi * 13) % 10)) * sc * l_scale
+                fy_b = turf_y + y_off * sc
+                f_lean = wind_dir * (1.5 + 8.0 * wind_force) * sc * l_scale
+                fp = QPainterPath()
+                fp.moveTo(fx + f_lean, fy_b - fh)
+                fp.lineTo(fx + fw * 0.5, fy_b)
+                fp.lineTo(fx - fw * 0.5, fy_b)
+                fp.closeSubpath()
+                p.drawPath(fp)
+        p.restore()
+
+        def _draw_snowball(cx: float, cy: float, r: float, rot: float = 0.0) -> None:
+            p.save()
+            grad = QLinearGradient(QPointF(cx - r * 0.55, cy - r), QPointF(cx + r * 0.65, cy + r))
+            grad.setColorAt(0.0, QColor(253, 254, 255))
+            grad.setColorAt(0.48, QColor(235, 244, 254))
+            grad.setColorAt(0.84, QColor(204, 220, 240))
+            grad.setColorAt(1.0, QColor(168, 190, 218))
+            p.setPen(QPen(QColor(255, 255, 255, 195), 1.4))
+            p.setBrush(grad)
+            p.drawEllipse(QPointF(cx, cy), r, r * 0.96)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 110))
+            p.drawEllipse(QPointF(cx - r * 0.28, cy - r * 0.32), r * 0.36, r * 0.24)
+            for k in range(10):
+                ang = rot + k * 0.6283 + (k % 3) * 0.41
+                dist_f = 0.26 + ((k * 37) % 10) * 0.055
+                px = cx + math.cos(ang) * r * dist_f
+                py = cy + math.sin(ang) * r * dist_f * 0.92
+                p.setBrush(QColor(185, 206, 232, 95) if k % 2 == 0 else QColor(255, 255, 255, 130))
+                pr = max(1.5, r * (0.045 + (k % 3) * 0.018))
+                p.drawEllipse(QPointF(px, py), pr * 1.15, pr * 0.85)
+            p.restore()
 
         # 0. Old Wooden Log Cabin in the Center Background (massive timbers, night/day lighting, snow on roof)
         hx = core.center().x()
         hy = turf_y + 10.0 * sc
-        cab_w = 188.0 * sc
-        cab_h = 104.0 * sc
-        roof_h = 64.0 * sc
+        cab_w = 204.0 * sc
+        cab_h = 156.0 * sc
+        roof_h = 84.0 * sc
         cab_l = hx - cab_w * 0.5
         cab_t = hy - cab_h
 
         p.save()
         # Stone chimney on right side of roof + gentle smoke
         ch_x = hx + cab_w * 0.22
-        ch_w = 22.0 * sc
+        ch_w = 24.0 * sc
         ch_top = cab_t - roof_h * 0.86
         p.setPen(QPen(QColor(45, 48, 56), 1.0))
         p.setBrush(QColor(78, 82, 92))
-        p.drawRoundedRect(QRectF(ch_x, ch_top, ch_w, 46.0 * sc), 2.5, 2.5)
+        p.drawRoundedRect(QRectF(ch_x, ch_top, ch_w, 58.0 * sc), 2.5, 2.5)
         p.setBrush(QColor(96, 100, 112))
         p.drawRoundedRect(QRectF(ch_x - 3.0 * sc, ch_top - 4.0 * sc, ch_w + 6.0 * sc, 7.0 * sc), 2.0, 2.0)
         # Chimney smoke puffs
@@ -4112,40 +4181,38 @@ class AtmosphericScenePainter:
             p.setBrush(QColor(225, 232, 244, sa))
             p.drawEllipse(QPointF(sx_s, sy_s), sr_s, sr_s * 0.78)
 
-        # Massive horizontal weathered logs (7 stacked courses with notched corner ends)
-        n_logs = 7
+        # Massive horizontal rich-brown weathered logs (10 stacked courses with notched corner ends)
+        n_logs = 10
         log_h = cab_h / float(n_logs)
-        wet_dim = 1.0 - 0.16 * rain_amt
+        wet_dim = 1.0 - 0.12 * rain_amt
         for li in range(n_logs):
             ly = cab_t + li * log_h
-            # Slightly varied aged timber tones
             shade = ((li * 29) % 5) * 4
             lg = QLinearGradient(QPointF(cab_l, ly), QPointF(cab_l, ly + log_h))
-            lg.setColorAt(0.0, QColor(int((118 - shade) * wet_dim), int((78 - shade) * wet_dim), int((50 - shade) * wet_dim)))
-            lg.setColorAt(0.45, QColor(int((94 - shade) * wet_dim), int((60 - shade) * wet_dim), int((38 - shade) * wet_dim)))
-            lg.setColorAt(1.0, QColor(int((56 - shade) * wet_dim), int((35 - shade) * wet_dim), int((22 - shade) * wet_dim)))
-            p.setPen(QPen(QColor(38, 24, 15, 210), max(1.0, 1.2 * sc)))
+            lg.setColorAt(0.0, QColor(int((154 - shade) * wet_dim), int((98 - shade) * wet_dim), int((56 - shade // 2) * wet_dim)))
+            lg.setColorAt(0.45, QColor(int((126 - shade) * wet_dim), int((76 - shade) * wet_dim), int((42 - shade // 2) * wet_dim)))
+            lg.setColorAt(1.0, QColor(int((82 - shade) * wet_dim), int((48 - shade // 2) * wet_dim), int((26 - shade // 3) * wet_dim)))
+            p.setPen(QPen(QColor(56, 32, 18, 215), max(1.0, 1.2 * sc)))
             p.setBrush(lg)
-            # Protruding notched log ends on left & right
             p.drawRoundedRect(QRectF(cab_l - 11.0 * sc, ly, cab_w + 22.0 * sc, log_h + 0.5), log_h * 0.42, log_h * 0.42)
             # End-grain rings on protruding log ends
-            p.setBrush(QColor(138, 96, 62, 185))
+            p.setBrush(QColor(172, 118, 72, 195))
             p.drawEllipse(QRectF(cab_l - 11.0 * sc, ly + 1.0, log_h * 0.72, log_h - 2.0))
             p.drawEllipse(QRectF(cab_l + cab_w + 11.0 * sc - log_h * 0.72, ly + 1.0, log_h * 0.72, log_h - 2.0))
 
-        # Gable triangle upper wall (stacked shorter logs)
+        # Gable triangle upper wall (rich warm brown)
         gable = QPainterPath()
         gable.moveTo(cab_l + 4.0 * sc, cab_t + 2.0)
         gable.lineTo(hx, cab_t - roof_h + 6.0 * sc)
         gable.lineTo(cab_l + cab_w - 4.0 * sc, cab_t + 2.0)
         gable.closeSubpath()
-        p.setPen(QPen(QColor(42, 26, 16), 1.2))
-        p.setBrush(QColor(int(86 * wet_dim), int(54 * wet_dim), int(34 * wet_dim)))
+        p.setPen(QPen(QColor(58, 34, 18), 1.2))
+        p.setBrush(QColor(int(116 * wet_dim), int(70 * wet_dim), int(38 * wet_dim)))
         p.drawPath(gable)
 
         # Heavy wooden door on left-center + cozy porch lantern
-        door_w = 34.0 * sc
-        door_h = 62.0 * sc
+        door_w = 38.0 * sc
+        door_h = 74.0 * sc
         door_x = hx - cab_w * 0.28 - door_w * 0.5
         door_y = hy - door_h - 4.0 * sc
         p.setPen(QPen(QColor(38, 24, 15), max(1.5, 2.0 * sc)))
@@ -4160,11 +4227,11 @@ class AtmosphericScenePainter:
         p.drawEllipse(QPointF(door_x + door_w - 6.5 * sc, door_y + door_h * 0.54), 2.4 * sc, 2.4 * sc)
 
         # Windows (main window right of door + attic round/arch window) — glow warmly at night, glassy by day!
-        win_w = 42.0 * sc
-        win_h = 36.0 * sc
+        win_w = 46.0 * sc
+        win_h = 42.0 * sc
         win_x = hx + cab_w * 0.16 - win_w * 0.5
-        win_y = cab_t + 26.0 * sc
-        attic_r = 12.0 * sc
+        win_y = cab_t + 44.0 * sc
+        attic_r = 14.0 * sc
         attic_y = cab_t - roof_h * 0.36
 
         if light_w > 0.08:
@@ -4242,7 +4309,7 @@ class AtmosphericScenePainter:
             p.drawRoundedRect(QRectF(win_x - 4.0 * sc, win_y + win_h - 3.5 * sc, win_w + 8.0 * sc, 5.0 * sc), 2.5, 2.5)
         p.restore()
 
-        # Helper for seasonal deciduous leafy trees (visible in clear/cloudy/rainy weather, replaced by pine trees in snow!)
+        # Helper for seasonal deciduous leafy trees with wind bend + individual fluttering leaves
         leafy_vis = max(0.0, 1.0 - max(snow_amt, tree_vis if snow_amt > 0.1 else 0.0))
         if leafy_vis > 0.02:
             def _draw_leafy_tree(tx_l: float, scale_t: float, seed_off: float) -> None:
@@ -4250,42 +4317,65 @@ class AtmosphericScenePainter:
                 p.setOpacity(leafy_vis)
                 by_l = turf_y + 10.0 * sc
                 ts = sc * scale_t
-                sway = math.sin(phase_t * 1.3 + seed_off) * 3.5 * ts
-                # Textured bark trunk & forked branches
+                gust = math.sin(phase_t * (1.8 + wind_force * 2.6) + seed_off)
+                lean = wind_dir * (3.0 + 26.0 * (wind_force ** 1.35)) * ts + gust * (3.0 + 7.5 * wind_force) * ts
+
+                # Curved bending trunk & forked branches
                 p.setPen(Qt.PenStyle.NoPen)
                 tr_g = QLinearGradient(QPointF(tx_l - 10 * ts, by_l), QPointF(tx_l + 10 * ts, by_l))
-                tr_g.setColorAt(0.0, QColor(78, 52, 34))
-                tr_g.setColorAt(0.5, QColor(106, 72, 46))
-                tr_g.setColorAt(1.0, QColor(58, 38, 24))
+                tr_g.setColorAt(0.0, QColor(88, 56, 34))
+                tr_g.setColorAt(0.5, QColor(118, 76, 46))
+                tr_g.setColorAt(1.0, QColor(64, 40, 24))
                 p.setBrush(tr_g)
                 trunk_p = QPainterPath()
                 trunk_p.moveTo(tx_l - 12.0 * ts, by_l + 4.0)
-                trunk_p.quadTo(tx_l - 7.0 * ts, by_l - 55.0 * ts, tx_l - 5.5 * ts + sway * 0.3, by_l - 115.0 * ts)
-                trunk_p.lineTo(tx_l + 5.5 * ts + sway * 0.3, by_l - 115.0 * ts)
-                trunk_p.quadTo(tx_l + 7.0 * ts, by_l - 55.0 * ts, tx_l + 12.0 * ts, by_l + 4.0)
+                trunk_p.quadTo(tx_l - 6.0 * ts + lean * 0.25, by_l - 58.0 * ts, tx_l - 5.0 * ts + lean * 0.65, by_l - 120.0 * ts)
+                trunk_p.lineTo(tx_l + 5.0 * ts + lean * 0.65, by_l - 120.0 * ts)
+                trunk_p.quadTo(tx_l + 6.0 * ts + lean * 0.25, by_l - 58.0 * ts, tx_l + 12.0 * ts, by_l + 4.0)
                 trunk_p.closeSubpath()
                 p.drawPath(trunk_p)
-                p.setPen(QPen(QColor(82, 54, 34), max(2.0, 5.0 * ts), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.drawLine(QPointF(tx_l + sway * 0.2, by_l - 90.0 * ts), QPointF(tx_l - 38.0 * ts + sway * 0.6, by_l - 135.0 * ts))
-                p.drawLine(QPointF(tx_l + sway * 0.2, by_l - 95.0 * ts), QPointF(tx_l + 40.0 * ts + sway * 0.6, by_l - 138.0 * ts))
+                p.setPen(QPen(QColor(92, 58, 34), max(2.0, 4.8 * ts), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(tx_l + lean * 0.48, by_l - 92.0 * ts), QPointF(tx_l - 38.0 * ts + lean * 0.85, by_l - 138.0 * ts))
+                p.drawLine(QPointF(tx_l + lean * 0.50, by_l - 96.0 * ts), QPointF(tx_l + 40.0 * ts + lean * 0.85, by_l - 140.0 * ts))
+                p.drawLine(QPointF(tx_l + lean * 0.62, by_l - 116.0 * ts), QPointF(tx_l - 12.0 * ts + lean * 0.92, by_l - 160.0 * ts))
+                p.drawLine(QPointF(tx_l + lean * 0.62, by_l - 116.0 * ts), QPointF(tx_l + 14.0 * ts + lean * 0.92, by_l - 162.0 * ts))
 
-                # Multi-layered lush leafy crown
-                foliage_clusters = [
-                    (tx_l - 42.0 * ts + sway * 0.7, by_l - 148.0 * ts, 46.0 * ts, QColor(34, 118, 58)),
-                    (tx_l + 42.0 * ts + sway * 0.7, by_l - 150.0 * ts, 48.0 * ts, QColor(28, 104, 52)),
-                    (tx_l + sway * 0.85, by_l - 186.0 * ts, 56.0 * ts, QColor(42, 136, 66)),
-                    (tx_l - 24.0 * ts + sway * 0.9, by_l - 168.0 * ts, 42.0 * ts, QColor(52, 152, 74)),
-                    (tx_l + 24.0 * ts + sway * 0.9, by_l - 166.0 * ts, 42.0 * ts, QColor(46, 142, 70)),
-                ]
-                for fx, fy, fr, fcol in foliage_clusters:
-                    fg = QLinearGradient(QPointF(fx - fr * 0.5, fy - fr), QPointF(fx + fr * 0.5, fy + fr))
-                    c_hi = fcol.lighter(128) if light_w < 0.5 else fcol.darker(120)
-                    c_lo = fcol.darker(145) if light_w < 0.5 else fcol.darker(185)
-                    fg.setColorAt(0.0, c_hi)
-                    fg.setColorAt(1.0, c_lo)
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(fg)
-                    p.drawEllipse(QPointF(fx, fy), fr, fr * 0.88)
+                # 150 dense individual fluttering leaves (zero circular blobs!)
+                leaf_colors = (
+                    QColor(21, 128, 61),
+                    QColor(22, 163, 74),
+                    QColor(34, 197, 94),
+                    QColor(74, 222, 128),
+                    QColor(134, 239, 172),
+                )
+                n_leaves = 150
+                for li in range(n_leaves):
+                    ang_c = ((li * 2.39996) + seed_off) % 6.28318
+                    rad_c = math.sqrt((li + 0.5) / float(n_leaves))
+                    lx = tx_l + lean * (0.78 + 0.22 * rad_c) + math.cos(ang_c) * 74.0 * ts * rad_c
+                    ly = (by_l - 164.0 * ts) + math.sin(ang_c) * 54.0 * ts * rad_c
+                    flutter = math.sin(phase_t * (3.0 + wind_force * 4.8) + li * 1.37 + seed_off)
+                    lx += flutter * (2.2 + 5.5 * wind_force) * ts
+                    ly += math.cos(phase_t * 2.5 + li * 0.95) * (1.4 + 2.5 * wind_force) * ts
+                    l_ang = ang_c + flutter * (0.36 + 0.48 * wind_force)
+                    lw = (9.0 + (li % 3) * 2.2) * ts
+                    lh = (4.8 + (li % 2) * 1.2) * ts
+                    # Inner leaves slightly darker for natural depth
+                    depth_idx = 0 if li < 45 else (1 + (li % 4))
+                    lcol = leaf_colors[depth_idx]
+                    if light_w > 0.25:
+                        lcol = lcol.darker(int(100 + 68 * light_w))
+                    p.save()
+                    p.translate(lx, ly)
+                    p.rotate(math.degrees(l_ang))
+                    leaf_p = QPainterPath()
+                    leaf_p.moveTo(-lw * 0.5, 0.0)
+                    leaf_p.quadTo(0.0, -lh, lw * 0.5, 0.0)
+                    leaf_p.quadTo(0.0, lh, -lw * 0.5, 0.0)
+                    p.setPen(QPen(lcol.darker(145), 0.65))
+                    p.setBrush(lcol)
+                    p.drawPath(leaf_p)
+                    p.restore()
                 p.restore()
 
             _draw_leafy_tree(core.right() - 128.0 * sc, 1.0, 0.0)
@@ -4343,33 +4433,37 @@ class AtmosphericScenePainter:
             p.setBrush(trunk_g)
             p.drawRoundedRect(QRectF(tx - tw * 0.5, by - th, tw, th + 6.0), 4.0, 4.0)
 
-            # 5 lush pine tiers with jagged branch silhouettes & individual visible pine needles
+            # 5 lush pine tiers with jagged branch silhouettes, wind lean & swaying pine needles
+            pine_gust = math.sin(phase_t * (2.0 + wind_force * 2.8))
+            pine_lean = wind_dir * (2.5 + 22.0 * (wind_force ** 1.35)) * sc + pine_gust * (2.5 + 6.5 * wind_force) * sc
             tiers = (
-                (by - 28.0 * sc, 112.0 * sc, 82.0 * sc),
-                (by - 82.0 * sc, 94.0 * sc, 74.0 * sc),
-                (by - 134.0 * sc, 76.0 * sc, 66.0 * sc),
-                (by - 182.0 * sc, 58.0 * sc, 58.0 * sc),
-                (by - 224.0 * sc, 40.0 * sc, 52.0 * sc),
+                (by - 28.0 * sc, 112.0 * sc, 82.0 * sc, 0.12),
+                (by - 82.0 * sc, 94.0 * sc, 74.0 * sc, 0.30),
+                (by - 134.0 * sc, 76.0 * sc, 66.0 * sc, 0.52),
+                (by - 182.0 * sc, 58.0 * sc, 58.0 * sc, 0.74),
+                (by - 224.0 * sc, 40.0 * sc, 52.0 * sc, 0.96),
             )
-            for t_idx, (t_bot, half_w, tier_h) in enumerate(tiers):
+            for t_idx, (t_bot, half_w, tier_h, lean_k) in enumerate(tiers):
                 t_top = t_bot - tier_h
+                tx_t = tx + pine_lean * lean_k
+                tx_b = tx + pine_lean * max(0.0, lean_k - 0.14)
 
                 # Jagged feathery bough silhouette
                 bough = QPainterPath()
-                bough.moveTo(tx, t_top)
-                bough.lineTo(tx + half_w * 0.45, t_top + tier_h * 0.42)
-                bough.lineTo(tx + half_w, t_bot - 4.0 * sc)
+                bough.moveTo(tx_t, t_top)
+                bough.lineTo(tx_t + half_w * 0.45, t_top + tier_h * 0.42)
+                bough.lineTo(tx_b + half_w, t_bot - 4.0 * sc)
                 n_teeth = 7 - (t_idx // 2)
                 for j in range(n_teeth * 2 + 1):
                     frac = j / float(n_teeth * 2)
-                    bx_t = (tx + half_w) - frac * (half_w * 2.0)
+                    bx_t = (tx_b + half_w) - frac * (half_w * 2.0)
                     tooth_drop = (6.5 * sc) if (j % 2 == 1) else (-3.0 * sc)
                     arch = math.sin(frac * math.pi) * (7.0 * sc)
                     bough.lineTo(bx_t, t_bot + tooth_drop + arch)
-                bough.lineTo(tx - half_w * 0.45, t_top + tier_h * 0.42)
+                bough.lineTo(tx_t - half_w * 0.45, t_top + tier_h * 0.42)
                 bough.closeSubpath()
 
-                tg = QLinearGradient(QPointF(tx - half_w, t_top), QPointF(tx + half_w, t_bot))
+                tg = QLinearGradient(QPointF(tx_t - half_w, t_top), QPointF(tx_b + half_w, t_bot))
                 tg.setColorAt(0.0, QColor(32, 116, 68))
                 tg.setColorAt(0.50, QColor(18, 82, 48))
                 tg.setColorAt(1.0, QColor(10, 52, 32))
@@ -4377,7 +4471,7 @@ class AtmosphericScenePainter:
                 p.setPen(QPen(QColor(46, 146, 88, 145), 1.0))
                 p.drawPath(bough)
 
-                # Visible individual pine needles fanning outward along the bough
+                # Visible individual swaying pine needles fanning outward along the bough
                 p.save()
                 p.setClipPath(bough)
                 n_needles = int(round(36 - t_idx * 4))
@@ -4385,8 +4479,9 @@ class AtmosphericScenePainter:
                     nf = (ni + 0.5) / float(n_needles)
                     row_y = t_top + tier_h * (0.25 + ((ni * 37) % 10) * 0.072)
                     span_at_y = half_w * max(0.18, (row_y - t_top) / max(1.0, tier_h))
-                    nx0 = tx + (nf * 2.0 - 1.0) * span_at_y * 0.92
-                    ang = ((nx0 - tx) / max(1.0, span_at_y)) * 0.72 + math.pi * 0.5
+                    nx0 = tx_b + (nf * 2.0 - 1.0) * span_at_y * 0.92
+                    n_sway = math.sin(phase_t * (3.0 + wind_force * 3.5) + ni * 0.9 + t_idx) * (0.10 + 0.22 * wind_force)
+                    ang = ((nx0 - tx_b) / max(1.0, span_at_y)) * 0.72 + math.pi * 0.5 + n_sway
                     n_len = (9.0 + (ni % 3) * 3.5) * sc
                     nx1 = nx0 + math.cos(ang) * n_len
                     ny1 = row_y + math.sin(ang) * n_len
@@ -4399,7 +4494,7 @@ class AtmosphericScenePainter:
                 for side in (-1.0, 1.0):
                     for k in range(4):
                         kf = 0.35 + k * 0.18
-                        ex = tx + side * half_w * kf
+                        ex = tx_b + side * half_w * kf
                         ey = t_top + tier_h * kf
                         for d_ang in (-0.28, 0.0, 0.28):
                             ang = (0.35 if side > 0 else math.pi - 0.35) + d_ang
@@ -4409,10 +4504,10 @@ class AtmosphericScenePainter:
 
                 # Soft snow dusting on upper bough ridges
                 snow_cap = QPainterPath()
-                snow_cap.moveTo(tx, t_top)
-                snow_cap.lineTo(tx + half_w * 0.44, t_top + tier_h * 0.36)
-                snow_cap.quadTo(tx + half_w * 0.16, t_top + tier_h * 0.44, tx, t_top + tier_h * 0.38)
-                snow_cap.quadTo(tx - half_w * 0.16, t_top + tier_h * 0.44, tx - half_w * 0.44, t_top + tier_h * 0.36)
+                snow_cap.moveTo(tx_t, t_top)
+                snow_cap.lineTo(tx_t + half_w * 0.44, t_top + tier_h * 0.36)
+                snow_cap.quadTo(tx_t + half_w * 0.16, t_top + tier_h * 0.44, tx_t, t_top + tier_h * 0.38)
+                snow_cap.quadTo(tx_t - half_w * 0.16, t_top + tier_h * 0.44, tx_t - half_w * 0.44, t_top + tier_h * 0.36)
                 snow_cap.closeSubpath()
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(242, 249, 255, 195))
