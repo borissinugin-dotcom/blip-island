@@ -6,6 +6,15 @@
       "blocked_features": [],
       "label": "50243267e7da",
       "updated_at": 1795353665
+    },
+    "ff0f3d372da7c50d331548f1ce05c74f743a0e780e4bd0f0a0e2b6efe75e0bab": {
+      "mode": "active",
+      "block_payment": true,
+      "blocked_features": [
+        "glass"
+      ],
+      "label": "ff0f3d372da7",
+      "updated_at": 1795374374
     }
   }
 }
