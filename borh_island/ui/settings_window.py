@@ -409,7 +409,8 @@ class SettingsWindow(QDialog):
 
     def _step_char_thumbs(self) -> None:
         for cw in self._char_thumbs:
-            cw.step_frame(1.25)
+            if not cw.visibleRegion().isEmpty():
+                cw.step_frame(1.5)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)

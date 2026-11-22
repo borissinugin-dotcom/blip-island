@@ -1570,6 +1570,8 @@ class IslandWindow(QWidget):
             self._anim.setEasingCurve(curve)
         else:
             # Hide panel immediately so Qt layout minSize does not clamp collapse animation!
+            if hasattr(self._atmo_anim, "on_island_collapsed"):
+                self._atmo_anim.on_island_collapsed()
             self._hover_collapse_block_until = time.monotonic() + 0.65
             self._hover_expand_timer.stop()
             if hasattr(self.panel, "card_rain"):
@@ -2533,8 +2535,8 @@ class IslandWindow(QWidget):
             edge_nx = vx / dist
             edge_ny = vy / dist
 
-        catch_dist = 40.0   # calm magnetic catch outside edge
-        break_dist = 54.0   # calm stretch distance before droplet snaps & ricochets
+        catch_dist = 34.0 if self._expanded else 22.0   # tight magnetic catch around visible island
+        break_dist = 52.0 if self._expanded else 38.0   # calm stretch distance before droplet snaps & ricochets
         target_amp = 0.0
         target_indent = 0.0
         active_vis = self.isVisible() and not self.isMinimized()
@@ -2651,7 +2653,7 @@ class IslandWindow(QWidget):
         self._lmb_was_down = lmb_down
 
         # Calm fluid momentum: zero sinusoidal standing vibration when cursor hovers still!
-        ambient_range = 175.0 if self._expanded else 95.0
+        ambient_range = 120.0 if self._expanded else 44.0
         near_fluid = active_vis and dist <= ambient_range
         if near_fluid:
             tx_norm = max(0.0, min(1.0, (local.x() - core.left()) / max(1.0, core.width())))
@@ -2841,9 +2843,20 @@ class IslandWindow(QWidget):
             cx = float(c_glob.x())
             cy = float(c_glob.y())
         else:
-            cx = self.x() + self.width() * 0.5
-            cy = self.y() + self.height() * 0.5
+            core = self._core_rect()
+            cx = self.x() + core.center().x()
+            cy = self.y() + core.center().y()
         if not (self._hide_state == "hidden" or self.isMinimized()):
+            core_now = self._core_rect()
+            over_core_now = core_now.adjusted(-8, -8, 8, 8).contains(
+                QPointF(float(pos.x() - self.x()), float(pos.y() - self.y()))
+            )
+            if self.isVisible() and self._hide_state == "shown" and over_core_now != self._hover_active:
+                self._hover_active = over_core_now
+                self._sync_character_state()
+                self._refresh_pill_views()
+                if not self._expanded and not self._music_strip_open and self._has_media:
+                    self.reposition(animate=True)
             dx = max(-1.0, min(1.0, (pos.x() - cx) / 320.0))
             dy = max(-1.0, min(1.0, (pos.y() - cy) / 220.0))
             prev_c = getattr(self, "_last_char_norm", (-9.0, -9.0))
@@ -2973,8 +2986,15 @@ class IslandWindow(QWidget):
             screens = QGuiApplication.screens()
             scr = screens[cfg.monitor_index] if 0 <= cfg.monitor_index < len(screens) else QGuiApplication.primaryScreen()
             scr_y = scr.geometry().y() if scr else 0
+            core_r = self._core_rect()
+            core_global = QRect(
+                self.x() + int(core_r.left()),
+                self.y() + int(core_r.top()),
+                int(core_r.width()),
+                int(core_r.height()),
+            ).adjusted(-10, -10, 10, 10)
             in_hover_zone = (
-                (self.isVisible() and self.geometry().adjusted(-8, -8, 8, 8).contains(pos))
+                (self.isVisible() and core_global.contains(pos))
                 or (scr_y <= pos.y() <= scr_y + 18 and abs(pos.x() - cx) <= 210)
             )
             if in_hover_zone:
@@ -3058,6 +3078,11 @@ class IslandWindow(QWidget):
             self.set_expanded(True)
 
     def enterEvent(self, event) -> None:  # noqa: N802
+        core = self._core_rect()
+        over_core = core.adjusted(-10, -10, 10, 10).contains(QPointF(self.mapFromGlobal(QCursor.pos())))
+        if not over_core and not self._expanded:
+            super().enterEvent(event)
+            return
         self._hover_active = True
         if self._hide_state in ("hidden", "hiding"):
             self._hide_state = "showing"
@@ -3084,8 +3109,11 @@ class IslandWindow(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             y = event.position().y()
+            core = self._core_rect()
+            pill_h = core.height() if not self._expanded else max(30.0, min(54.0, 42.0 * max(0.68, min(1.5, float(self.config_mgr.config.scale)))))
+            in_pill_y = (core.top() - 4.0) <= y <= (core.top() + pill_h + 4.0)
             if self._expanded:
-                if _DROP_PAD_TOP <= y <= _DROP_PAD_TOP + 42:
+                if in_pill_y:
                     self.set_expanded(False)
                     event.accept()
                     return
@@ -3094,7 +3122,7 @@ class IslandWindow(QWidget):
                 self.set_expanded(True)
                 event.accept()
                 return
-            elif _DROP_PAD_TOP <= y <= _DROP_PAD_TOP + 42 and self._hide_state == "shown":
+            elif in_pill_y and self._hide_state == "shown":
                 # 1st tap: Music Strip if media is playing/loaded, otherwise full Panel directly
                 if self._has_media and not self._activity_active:
                     self._open_music_strip()
@@ -3105,7 +3133,9 @@ class IslandWindow(QWidget):
         super().mousePressEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        if self._expanded and event.position().y() > (_DROP_PAD_TOP + 42):
+        core = self._core_rect()
+        pill_h = max(30.0, min(54.0, 42.0 * max(0.68, min(1.5, float(self.config_mgr.config.scale)))))
+        if self._expanded and event.position().y() > (core.top() + pill_h + 4.0):
             super().wheelEvent(event)
             return
         delta = event.angleDelta().y()

@@ -2323,15 +2323,21 @@ class HomeTab(QWidget):
         self.tools_card = QFrame()
         self.tools_card.setObjectName("Card")
         tc_lay = QVBoxLayout(self.tools_card)
-        tc_lay.setContentsMargins(8, 5, 8, 5)
-        tc_lay.setSpacing(3)
+        tc_lay.setContentsMargins(10, 7, 10, 8)
+        tc_lay.setSpacing(6)
         tc_hdr = QHBoxLayout()
         tc_hdr.setSpacing(6)
         self.tools_hdr_lbl = QLabel(tr("quick_actions"))
         self.tools_hdr_lbl.setObjectName("Heading")
         self.rec_audio_combo = QComboBox()
         self.rec_audio_combo.setToolTip("Звук при записи экрана")
-        self.rec_audio_combo.setFixedHeight(24)
+        self.rec_audio_combo.setFixedHeight(22)
+        self.rec_audio_combo.setStyleSheet(
+            "QComboBox { min-height: 22px; max-height: 22px; padding: 0px 8px; font-size: 10px; "
+            "font-weight: 600; border-radius: 11px; background: rgba(255,255,255,0.08); "
+            "border: 1px solid rgba(255,255,255,0.16); }"
+            "QComboBox:hover { background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.28); }"
+        )
         self.rec_audio_combo.addItem("🔇 Без звука", "none")
         self.rec_audio_combo.addItem("🔊 Звук ПК", "system")
         self.rec_audio_combo.addItem("🎙 ПК + Микрофон", "both")
@@ -2343,7 +2349,7 @@ class HomeTab(QWidget):
         tc_lay.addLayout(tc_hdr)
 
         self._tools_grid = QGridLayout()
-        self._tools_grid.setSpacing(4)
+        self._tools_grid.setSpacing(5)
         self.tool_buttons: dict[str, QPushButton] = {}
         self._tool_icon_map: dict[str, str] = {
             "screenshot_area": "screenshot",
@@ -2355,6 +2361,17 @@ class HomeTab(QWidget):
             "record": "record",
             "dictate": "dictate",
             "command_bar": "command",
+        }
+        self._tool_tints: dict[str, tuple[str, str]] = {
+            "screenshot_area": ("#60A5FA", "96, 165, 250"),
+            "screenshot_full": ("#38BDF8", "56, 189, 248"),
+            "ocr": ("#2DD4BF", "45, 212, 191"),
+            "color_picker": ("#E879F9", "232, 121, 249"),
+            "restart_screens": ("#34D399", "52, 211, 153"),
+            "qr_scan": ("#FBBF24", "251, 191, 36"),
+            "record": ("#F87171", "248, 113, 113"),
+            "dictate": ("#A78BFA", "167, 139, 250"),
+            "command_bar": ("#818CF8", "129, 140, 248"),
         }
         tools = [
             ("screenshot_area", tr("screenshot")),
@@ -2372,13 +2389,13 @@ class HomeTab(QWidget):
             btn = QPushButton(label)
             btn.setMinimumWidth(0)
             btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-            btn.setFixedHeight(23)
-            btn.setStyleSheet(
-                "QPushButton { min-height: 23px; max-height: 23px; padding: 0px 6px; font-size: 10px; border-radius: 10px; }"
-            )
+            btn.setFixedHeight(27)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            hex_c, rgb_c = self._tool_tints.get(tid, ("#60A5FA", "96, 165, 250"))
+            btn.setStyleSheet(self._tool_btn_qss(rgb_c))
             btn.setToolTip(label)
-            btn.setIcon(get_icon(self._tool_icon_map[tid], size=13, color=self._icon_fg, accent=self._accent_hex))
-            btn.setIconSize(QSize(13, 13))
+            btn.setIcon(get_icon(self._tool_icon_map[tid], size=14, color=self._icon_fg, accent=hex_c))
+            btn.setIconSize(QSize(14, 14))
             btn.clicked.connect(lambda _, t=tid: self.tool_triggered.emit(t))
             self.tool_buttons[tid] = btn
         tc_lay.addLayout(self._tools_grid)
@@ -2554,9 +2571,22 @@ class HomeTab(QWidget):
         self.vol_btn.setIcon(get_icon("mute" if self._muted else "volume", size=15, color=self._icon_fg, accent=pal.accent))
         for tid, btn in self.tool_buttons.items():
             ico = self._tool_icon_map.get(tid, "settings")
-            btn.setIcon(get_icon(ico, size=14, color=self._icon_fg, accent=pal.accent))
+            hex_c, _rgb_c = self._tool_tints.get(tid, (pal.accent, "96, 165, 250"))
+            btn.setIcon(get_icon(ico, size=14, color=self._icon_fg, accent=hex_c))
             btn.setIconSize(QSize(14, 14))
         self.refresh_launcher()
+
+    @staticmethod
+    def _tool_btn_qss(rgb: str) -> str:
+        return (
+            f"QPushButton {{ min-height: 27px; max-height: 27px; padding: 0px 8px; "
+            f"font-size: 10.5px; font-weight: 600; border-radius: 11px; "
+            f"background: rgba({rgb}, 0.12); border: 1px solid rgba({rgb}, 0.28); }}"
+            f"QPushButton:hover {{ background: rgba({rgb}, 0.24); border: 1px solid rgba({rgb}, 0.58); }}"
+            f"QPushButton:pressed {{ background: rgba({rgb}, 0.34); }}"
+            f"QPushButton#Danger {{ background: rgba(239, 68, 68, 0.85); color: #FFFFFF; border: 1px solid #FCA5A5; }}"
+            f"QPushButton#Primary {{ background: rgba(139, 92, 246, 0.85); color: #FFFFFF; border: 1px solid #C4B5FD; }}"
+        )
 
     def set_dev_tools_visible(self, show_dev: bool) -> None:
         self._show_dev_tools = bool(show_dev)

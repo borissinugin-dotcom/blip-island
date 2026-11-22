@@ -2196,6 +2196,8 @@ class AtmosphereAnimator:
         "lightning_amt",
         "snow_amt",
         "snow_accum",
+        "snowman_p",
+        "tree_vis",
         "cloud_amt",
         "clear_amt",
         "sun_alpha",
@@ -2213,6 +2215,8 @@ class AtmosphereAnimator:
         self.lightning_amt = 0.0
         self.snow_amt = 0.0
         self.snow_accum = 0.0
+        self.snowman_p = 0.0
+        self.tree_vis = 0.0
         self.cloud_amt = 0.35
         self.clear_amt = 1.0
         self.sun_alpha = 0.0
@@ -2294,6 +2298,8 @@ class AtmosphereAnimator:
             self.lightning_amt = t_li
             self.snow_amt = t_sn
             self.snow_accum = 0.0
+            self.snowman_p = 0.0
+            self.tree_vis = 1.0 if t_sn > 0.5 else 0.0
             self.cloud_amt = t_cl
             self.clear_amt = t_br
             self.sun_alpha = 1.0 if t_sun is not None else 0.0
@@ -2311,12 +2317,19 @@ class AtmosphereAnimator:
         if self.snow_amt > 0.25:
             # Gradually build snowdrifts (~0 -> 1.0 over ~60s of sustained snowfall)
             self.snow_accum = min(1.0, self.snow_accum + (snow_dt / 60.0) * self.snow_amt)
+            # Live self-rolling snowman builds right in front of the user (~9s)
+            self.snowman_p = min(1.0, self.snowman_p + (dt_eff / 9.0) * self.snow_amt)
         elif self.rain_amt > 0.25:
             # Rain rapidly washes/melts snowdrifts
             self.snow_accum = max(0.0, self.snow_accum - snow_dt / 14.0)
+            self.snowman_p = max(0.0, self.snowman_p - dt_eff / 2.2)
+            self.tree_vis = max(0.0, self.tree_vis - dt_eff / 1.5)
         else:
             # Gentle ambient melt after snowfall stops
             self.snow_accum = max(0.0, self.snow_accum - snow_dt / 40.0)
+            self.snowman_p = max(0.0, self.snowman_p - dt_eff / 3.5)
+            if self.snow_amt <= 0.08:
+                self.tree_vis = max(0.0, self.tree_vis - dt_eff / 1.8)
         self.cloud_amt = self._exp_lerp(self.cloud_amt, t_cl, dt_eff, 1.20)
         self.clear_amt = self._exp_lerp(self.clear_amt, t_br, dt_eff, 1.15)
 
@@ -2328,10 +2341,16 @@ class AtmosphereAnimator:
         self.moon_pos = self._lerp_pt(self.moon_pos, t_moon, dt_eff, 0.80)
         return seg, wkind, forced_moon
 
+    def on_island_collapsed(self) -> None:
+        """Called when the user closes/collapses the island so the New Year tree appears off-screen."""
+        if self.snow_amt > 0.25:
+            self.tree_vis = 1.0
+
     def is_transitioning(self) -> bool:
         return (
             0.02 < self.rain_amt < 0.98
             or 0.02 < self.snow_amt < 0.98
+            or (self.snow_amt > 0.25 and 0.0 < self.snowman_p < 1.0)
             or 0.02 < self.sun_alpha < 0.98
             or 0.02 < self.moon_alpha < 0.98
             or max(self.seg_weights.values()) < 0.96
@@ -3113,17 +3132,17 @@ class AtmosphericScenePainter:
                 p.restore()
 
         if snow_amt > 0.02:
-            # Realistic 3-plane snowfall: fine mist, crystalline stars, & soft foreground bokeh with window-edge bounce
+            # Detailed multi-plane New Year snowfall: fine mist, crisp dendritic crystals, soft bokeh & sparkling glints
             ground_y = float(turf_y) if turf_y is not None else (y0 + h - 6.0)
             span_y = max(40.0, ground_y - w_top)
-            n_snow = max(8, int(round(68 * snow_amt * q_p)))
+            n_snow = max(14, int(round(98 * snow_amt * q_p)))
             snow_src = QRectF(0.0, 0.0, 24.0, 24.0)
             p.save()
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             bg_snow = QPainterPath()
             period_sx = span_x * 2.0
             for i in range(n_snow):
-                plane = i % 5  # 0,1 = fine far dust; 2,3 = crisp crystals; 4 = soft foreground bokeh
+                plane = i % 6  # 0,1 = fine far dust; 2,3 = crisp crystals; 4 = soft foreground bokeh; 5 = ice glints
                 # Golden-ratio / Knuth multiplicative hash avoids periodic horizontal banding
                 hx = ((i * 2654435761) & 0xFFFF) / 65535.0
                 hy = (((i * 2246822519) + 12347) & 0xFFFF) / 65535.0
@@ -4023,3 +4042,239 @@ class AtmosphericScenePainter:
             anim_state=atmo_anim,
             quality=quality,
         )
+        snow_vis = atmo_anim.snow_amt if (atmo_anim is not None and atmo_anim.initialized) else (1.0 if wkind == "snow" else 0.0)
+        snowman_p = atmo_anim.snowman_p if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
+        tree_vis = atmo_anim.tree_vis if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
+        if snow_vis > 0.04 and (snowman_p > 0.01 or tree_vis > 0.02):
+            cls._paint_new_year_props(
+                p,
+                core,
+                turf_y=core.bottom() - 5.0,
+                phase_t=phase_t,
+                snow_amt=snow_vis,
+                snowman_p=snowman_p,
+                tree_vis=tree_vis,
+            )
+
+    @staticmethod
+    def _paint_new_year_props(
+        p: QPainter,
+        core: QRectF,
+        *,
+        turf_y: float,
+        phase_t: float,
+        snow_amt: float,
+        snowman_p: float,
+        tree_vis: float,
+    ) -> None:
+        """Paint New Year props: right-side Christmas tree (appears when closed) and live self-rolling snowman."""
+
+        def _clamp01(v: float) -> float:
+            return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
+        def _smooth(v: float) -> float:
+            t = _clamp01(v)
+            return t * t * (3.0 - 2.0 * t)
+
+        def _draw_snowball(cx: float, cy: float, r: float, rot: float = 0.0) -> None:
+            p.save()
+            grad = QLinearGradient(QPointF(cx - r * 0.4, cy - r), QPointF(cx + r * 0.5, cy + r))
+            grad.setColorAt(0.0, QColor(252, 254, 255))
+            grad.setColorAt(0.65, QColor(228, 238, 250))
+            grad.setColorAt(1.0, QColor(186, 204, 228))
+            p.setPen(QPen(QColor(255, 255, 255, 180), 1.0))
+            p.setBrush(grad)
+            p.drawEllipse(QPointF(cx, cy), r, r * 0.96)
+            # Subtle rolling snow-clump speckles so rotation is visible
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(200, 218, 238, 130))
+            for k in range(3):
+                ang = rot + k * 2.094
+                px = cx + math.cos(ang) * r * 0.48
+                py = cy + math.sin(ang) * r * 0.45
+                p.drawEllipse(QPointF(px, py), max(1.2, r * 0.14), max(1.0, r * 0.11))
+            p.restore()
+
+        # 1. Right-side New Year Christmas Tree with twinkling garland (pre-appears while closed)
+        if tree_vis > 0.02 and core.width() > 260.0:
+            p.save()
+            p.setOpacity(max(0.0, min(1.0, tree_vis * snow_amt)))
+            tx = core.right() - 56.0
+            by = turf_y + 1.0
+
+            # Soft ambient glow behind tree
+            glow_img = _get_glow_disc_img((255, 224, 130), 65, 58)
+            p.drawImage(QRectF(tx - 48.0, by - 96.0, 96.0, 96.0), glow_img)
+
+            # Trunk
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(82, 52, 34))
+            p.drawRoundedRect(QRectF(tx - 5.0, by - 14.0, 10.0, 15.0), 2.0, 2.0)
+
+            # 3 layered pine tiers with snow caps
+            tiers = (
+                (by - 10.0, 32.0, 32.0),
+                (by - 30.0, 25.0, 28.0),
+                (by - 48.0, 18.0, 24.0),
+            )
+            for t_bot, half_w, tier_h in tiers:
+                t_top = t_bot - tier_h
+                tri = QPainterPath()
+                tri.moveTo(tx, t_top)
+                tri.lineTo(tx + half_w, t_bot)
+                tri.quadTo(tx, t_bot + 3.5, tx - half_w, t_bot)
+                tri.closeSubpath()
+                tg = QLinearGradient(QPointF(tx - half_w, t_top), QPointF(tx + half_w, t_bot))
+                tg.setColorAt(0.0, QColor(28, 102, 62))
+                tg.setColorAt(0.55, QColor(18, 76, 46))
+                tg.setColorAt(1.0, QColor(12, 52, 34))
+                p.setBrush(tg)
+                p.setPen(QPen(QColor(46, 138, 86, 130), 0.9))
+                p.drawPath(tri)
+
+                # Snow dusting along top/edge of tier
+                snow_cap = QPainterPath()
+                snow_cap.moveTo(tx, t_top)
+                snow_cap.lineTo(tx + half_w * 0.42, t_top + tier_h * 0.42)
+                snow_cap.quadTo(tx, t_top + tier_h * 0.50, tx - half_w * 0.42, t_top + tier_h * 0.42)
+                snow_cap.closeSubpath()
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(240, 248, 255, 195))
+                p.drawPath(snow_cap)
+
+            # Garland cord + twinkling bulbs
+            bulbs = [
+                (tx - 10.0, by - 56.0, (255, 215, 90)),
+                (tx + 3.0, by - 52.0, (248, 113, 113)),
+                (tx + 12.0, by - 49.0, (56, 189, 248)),
+                (tx - 16.0, by - 36.0, (52, 211, 153)),
+                (tx - 3.0, by - 32.0, (255, 215, 90)),
+                (tx + 11.0, by - 33.0, (244, 114, 182)),
+                (tx - 21.0, by - 17.0, (248, 113, 113)),
+                (tx - 7.0, by - 13.0, (56, 189, 248)),
+                (tx + 8.0, by - 14.0, (255, 215, 90)),
+                (tx + 21.0, by - 18.0, (52, 211, 153)),
+            ]
+            p.setPen(QPen(QColor(30, 50, 40, 180), 1.1))
+            for idx in range(len(bulbs) - 1):
+                if idx in (2, 5):
+                    continue
+                p.drawLine(QPointF(bulbs[idx][0], bulbs[idx][1]), QPointF(bulbs[idx + 1][0], bulbs[idx + 1][1]))
+            p.setPen(Qt.PenStyle.NoPen)
+            for idx, (bx, by_b, rgb) in enumerate(bulbs):
+                tw = 0.52 + 0.48 * math.sin(phase_t * 3.6 + idx * 1.15)
+                b_glow = _get_glow_disc_img(rgb, int(round(85 + 95 * tw)), 14)
+                p.drawImage(QRectF(bx - 7.0, by_b - 7.0, 14.0, 14.0), b_glow)
+                p.setBrush(QColor(rgb[0], rgb[1], rgb[2], int(round(170 + 85 * tw))))
+                p.drawEllipse(QPointF(bx, by_b), 2.3, 2.3)
+
+            # Golden star on top
+            star_y = by - 73.5
+            star_tw = 0.7 + 0.3 * math.sin(phase_t * 2.8)
+            s_glow = _get_glow_disc_img((255, 230, 110), int(round(120 * star_tw)), 20)
+            p.drawImage(QRectF(tx - 10.0, star_y - 10.0, 20.0, 20.0), s_glow)
+            star_p = QPainterPath()
+            for k in range(10):
+                ang = -math.pi * 0.5 + k * (math.pi / 5.0)
+                rad = 6.2 if k % 2 == 0 else 2.6
+                pt = QPointF(tx + math.cos(ang) * rad, star_y + math.sin(ang) * rad)
+                if k == 0:
+                    star_p.moveTo(pt)
+                else:
+                    star_p.lineTo(pt)
+            star_p.closeSubpath()
+            p.setBrush(QColor(253, 224, 71))
+            p.drawPath(star_p)
+            p.restore()
+
+        # 2. Live Self-Rolling & Self-Decorating Snowman (left-center turf)
+        if snowman_p > 0.01 and core.width() > 260.0:
+            p.save()
+            p.setOpacity(max(0.0, min(1.0, snow_amt)))
+            sm_x = core.left() + 74.0
+            ground_y = turf_y + 1.0
+            r1, r2, r3 = 14.5, 10.8, 7.8
+
+            # Stage 1 (0.00..0.30): Bottom snowball rolls in from left
+            t1 = _smooth(snowman_p / 0.30)
+            b1_x = (core.left() + 14.0) + (sm_x - (core.left() + 14.0)) * t1
+            b1_r = r1 * (0.45 + 0.55 * t1)
+            b1_y = ground_y - b1_r
+            _draw_snowball(b1_x, b1_y, b1_r, rot=t1 * 6.28)
+
+            # Stage 2 (0.30..0.56): Middle torso snowball rolls in & hops onto bottom ball
+            if snowman_p > 0.30:
+                t2 = _smooth((snowman_p - 0.30) / 0.26)
+                b2_x = (core.left() + 16.0) + (sm_x - (core.left() + 16.0)) * t2
+                hop2 = math.sin(t2 * math.pi) * 20.0 if t2 < 1.0 else 0.0
+                b2_y = (ground_y - r2) + ((ground_y - r1 * 1.75 - r2) - (ground_y - r2)) * (t2 ** 1.35) - hop2
+                _draw_snowball(b2_x, b2_y, r2 * (0.55 + 0.45 * t2), rot=t2 * 7.5)
+
+            # Stage 3 (0.56..0.78): Head snowball rolls in & hops onto torso
+            head_y = ground_y - r1 * 1.75 - r2 * 1.72 - r3
+            if snowman_p > 0.56:
+                t3 = _smooth((snowman_p - 0.56) / 0.22)
+                b3_x = (sm_x + 48.0) + (sm_x - (sm_x + 48.0)) * t3
+                hop3 = math.sin(t3 * math.pi) * 24.0 if t3 < 1.0 else 0.0
+                b3_y = (ground_y - r3) + (head_y - (ground_y - r3)) * (t3 ** 1.35) - hop3
+                _draw_snowball(b3_x, b3_y, r3 * (0.65 + 0.35 * t3), rot=-t3 * 8.0)
+
+            # Stage 4 (0.78..1.00): Self-decorating accessories
+            torso_y = ground_y - r1 * 1.75 - r2
+            if snowman_p > 0.78:
+                # Coal eyes, smile & torso buttons
+                f_coal = _smooth((snowman_p - 0.78) / 0.07)
+                p.save()
+                p.setOpacity(f_coal * snow_amt)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(24, 28, 36))
+                p.drawEllipse(QPointF(sm_x - 2.6, head_y - 1.8), 1.3, 1.3)
+                p.drawEllipse(QPointF(sm_x + 2.6, head_y - 1.8), 1.3, 1.3)
+                for m in range(-2, 3):
+                    p.drawEllipse(QPointF(sm_x + m * 1.5, head_y + 2.8 - abs(m) * 0.35), 0.75, 0.75)
+                for by_off in (-3.2, 0.8, 4.8):
+                    p.drawEllipse(QPointF(sm_x, torso_y + by_off), 1.35, 1.35)
+                p.restore()
+
+            if snowman_p > 0.83:
+                # Orange carrot nose
+                f_nose = _smooth((snowman_p - 0.83) / 0.06)
+                nose_len = 7.5 * f_nose
+                nose = QPainterPath()
+                nose.moveTo(sm_x, head_y - 0.5)
+                nose.lineTo(sm_x + nose_len, head_y + 0.8)
+                nose.lineTo(sm_x, head_y + 2.0)
+                nose.closeSubpath()
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(249, 115, 22))
+                p.drawPath(nose)
+
+            if snowman_p > 0.87:
+                # Twig arms (gentle happy wave)
+                f_arms = _smooth((snowman_p - 0.87) / 0.06)
+                wave = math.sin(phase_t * 2.4) * 2.2 * f_arms
+                p.setPen(QPen(QColor(110, 72, 46), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(sm_x - r2 + 1.0, torso_y - 1.0), QPointF(sm_x - r2 - 10.0 * f_arms, torso_y - 6.0 * f_arms + wave))
+                p.drawLine(QPointF(sm_x + r2 - 1.0, torso_y - 1.0), QPointF(sm_x + r2 + 10.0 * f_arms, torso_y - 6.0 * f_arms - wave))
+
+            if snowman_p > 0.91:
+                # Crimson winter scarf
+                f_scarf = _smooth((snowman_p - 0.91) / 0.05)
+                neck_y = head_y + r3 * 0.78
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(220, 38, 38, int(round(240 * f_scarf))))
+                p.drawRoundedRect(QRectF(sm_x - 8.2 * f_scarf, neck_y - 2.0, 16.4 * f_scarf, 4.2), 2.0, 2.0)
+                p.drawRoundedRect(QRectF(sm_x + 2.5, neck_y + 1.0, 3.6, 8.5 * f_scarf), 1.5, 1.5)
+
+            if snowman_p > 0.95:
+                # Cozy dark top hat with red ribbon dropping onto head
+                f_hat = _smooth((snowman_p - 0.95) / 0.05)
+                hat_y = head_y - r3 + 1.2 - (1.0 - f_hat) * 14.0
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(30, 34, 44, int(round(245 * f_hat))))
+                p.drawRoundedRect(QRectF(sm_x - 9.0, hat_y - 2.0, 18.0, 3.0), 1.5, 1.5)
+                p.drawRoundedRect(QRectF(sm_x - 5.6, hat_y - 10.5, 11.2, 9.0), 2.0, 2.0)
+                p.setBrush(QColor(220, 38, 38, int(round(245 * f_hat))))
+                p.drawRect(QRectF(sm_x - 5.6, hat_y - 4.0, 11.2, 2.0))
+
+            p.restore()
