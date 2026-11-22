@@ -1873,7 +1873,25 @@ class IslandWindow(QWidget):
             self.pill_text.setText(self._pill_brand_text())
 
         self._refresh_badges()
+        full_style = self._is_builtin_full_pill()
+        self.character.setVisible(not full_style)
+        self.pill_text.setVisible(not full_style)
+        self.clock_lbl.setVisible(not full_style)
+        if full_style:
+            self.battery_dot.hide()
+            self.atmo_badge_btn.hide()
         self._sync_character_state()
+
+    def _is_builtin_full_pill(self) -> bool:
+        return bool(
+            (not self._expanded)
+            and (not self._music_strip_open)
+            and self.character.character_id.startswith("builtin_")
+            and (not self._activity_active)
+            and (not self._has_media)
+            and (not self._in_game)
+            and (not self._timer_text)
+        )
 
     def _pill_brand_text(self) -> str:
         from ..core.licensing import get_license_manager
@@ -2177,12 +2195,28 @@ class IslandWindow(QWidget):
     def set_recording_indicator(self, active: bool) -> None:
         self._recording = active
         self._refresh_badges()
+        full_style = self._is_builtin_full_pill()
+        self.character.setVisible(not full_style)
+        self.pill_text.setVisible(not full_style)
+        self.clock_lbl.setVisible(not full_style)
+        if full_style:
+            self.battery_dot.hide()
+            self.atmo_badge_btn.hide()
         self._sync_character_state()
+        self._refresh_pill_views()
 
     def set_dictating_indicator(self, active: bool) -> None:
         self._dictating = active
         self._refresh_badges()
+        full_style = self._is_builtin_full_pill()
+        self.character.setVisible(not full_style)
+        self.pill_text.setVisible(not full_style)
+        self.clock_lbl.setVisible(not full_style)
+        if full_style:
+            self.battery_dot.hide()
+            self.atmo_badge_btn.hide()
         self._sync_character_state()
+        self._refresh_pill_views()
 
     def set_ai_thinking(self, active: bool) -> None:
         self.character.set_thinking(active)
@@ -2796,7 +2830,11 @@ class IslandWindow(QWidget):
     # ------------------------------------------------------------------ Interactions & Auto-hide
     def _on_watch_tick(self) -> None:
         pos = QCursor.pos()
-        if self.character.isVisible():
+        if self._is_builtin_full_pill():
+            c_glob = self.mapToGlobal(self._core_rect().center().toPoint())
+            cx = float(c_glob.x())
+            cy = float(c_glob.y())
+        elif self.character.isVisible():
             c_glob = self.character.mapToGlobal(self.character.rect().center())
             cx = float(c_glob.x())
             cy = float(c_glob.y())
@@ -2864,6 +2902,7 @@ class IslandWindow(QWidget):
                 self._last_time_bucket = time_bucket
                 self._sync_palettes()
             self._sync_character_state()
+            self._refresh_pill_views()
 
         self._step_auto_hide_fsm(now_m, pos, cx)
 
@@ -3947,10 +3986,22 @@ class IslandWindow(QWidget):
 
         # Collapsed pill is ALWAYS pure solid black (no Liquid Glass, no Frost Glass)
         if not self._expanded:
-            p.setPen(QPen(border if (collapsed_tint or self._activity_active or self._drop_amp > 0.22 or self._alarm_active) else QColor(255, 255, 255, 34), 1.4))
+            is_builtin = self.character.character_id.startswith("builtin_")
+            if is_builtin and not (collapsed_tint or self._activity_active or self._drop_amp > 0.22 or self._alarm_active):
+                b_col = QColor(self.character.builtin_accent_hex())
+                b_col.setAlpha(95)
+            elif collapsed_tint or self._activity_active or self._drop_amp > 0.22 or self._alarm_active:
+                b_col = border
+            else:
+                b_col = QColor(255, 255, 255, 34)
+            p.setPen(QPen(b_col, 1.5))
             p.setBrush(QColor(0, 0, 0, 255))
             p.drawPath(path)
-            if self.pill_bar.isVisible() and self.character.isVisible() and self.character.has_island_top_addon():
+            if self.pill_bar.isVisible() and self._is_builtin_full_pill():
+                self.character.paint_full_island_face(p, core)
+                if self.character.has_island_top_addon():
+                    self.character.paint_island_top_addon(p, core, core.center().x())
+            elif self.pill_bar.isVisible() and self.character.isVisible() and self.character.has_island_top_addon():
                 char_pos = self.character.mapTo(self, self.character.rect().center())
                 self.character.paint_island_top_addon(p, core, float(char_pos.x()))
         elif self._expanded:

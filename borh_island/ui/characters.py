@@ -2182,6 +2182,97 @@ class CharacterWidget(QWidget):
         spec = self._BUILTIN_SPECS.get(self.character_id)
         return bool(spec and spec[2] != "none")
 
+    def builtin_accent_hex(self) -> str:
+        spec = self._BUILTIN_SPECS.get(self.character_id)
+        return spec[1] if spec else "#FFFFFF"
+
+    def paint_full_island_face(self, p: QPainter, core: QRectF) -> None:
+        """Render the selected built-in style's BIG eyes centered across the entire collapsed island."""
+        spec = self._BUILTIN_SPECS.get(self.character_id, ("round", "#FFFFFF", "none"))
+        eye_style, col_hex, _ = spec
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        cx = core.center().x()
+        cy = core.center().y()
+        r = min(core.height() * 0.44, 22.0)
+        lx = self._cursor_dx * r * 0.45
+        ly = self._cursor_dy * r * 0.38
+        blink = self._blink_t > 0.05
+        col = QColor(col_hex)
+        p.setPen(Qt.PenStyle.NoPen)
+
+        if eye_style == "cyclops":
+            er = r * 0.80
+            if blink:
+                p.setPen(QPen(col, 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(cx - er * 0.85, cy), QPointF(cx + er * 0.85, cy))
+            else:
+                p.setBrush(col)
+                p.drawEllipse(QPointF(cx, cy), er, er)
+                p.setBrush(QColor(8, 12, 22))
+                p.drawEllipse(QPointF(cx + lx * 0.9, cy + ly * 0.9), er * 0.46, er * 0.46)
+                p.setBrush(QColor(255, 255, 255, 235))
+                p.drawEllipse(QPointF(cx + lx * 0.9 - er * 0.16, cy + ly * 0.9 - er * 0.18), er * 0.17, er * 0.17)
+        elif eye_style == "visor":
+            vw = min(core.width() * 0.62, 165.0)
+            vh = r * 0.78
+            p.setBrush(QColor(15, 23, 42))
+            p.setPen(QPen(col, 1.8))
+            p.drawRoundedRect(QRectF(cx - vw * 0.5, cy - vh * 0.5, vw, vh), vh * 0.45, vh * 0.45)
+            scan_x = cx + lx * 2.1 + math.sin(self._phase * 2.4) * (vw * 0.25)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(col)
+            p.drawEllipse(QPointF(max(cx - vw * 0.42, min(cx + vw * 0.42, scan_x)), cy + ly * 0.35), vh * 0.38, vh * 0.38)
+        else:
+            sep = r * 0.95
+            ew = r * 0.50
+            eh = r * 0.66 if eye_style != "sleepy" else r * 0.28
+            for sx in (-1.0, 1.0):
+                ex = cx + sx * sep
+                if blink:
+                    p.setPen(QPen(col, 2.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    p.drawLine(QPointF(ex - ew * 0.85, cy), QPointF(ex + ew * 0.85, cy))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    continue
+                if eye_style == "pixel":
+                    pw = ew * 1.7
+                    ph = eh * 1.65
+                    p.setBrush(col)
+                    p.drawRect(QRectF(ex - pw * 0.5 + lx * 0.45, cy - ph * 0.5 + ly * 0.45, pw, ph))
+                    p.setBrush(QColor(0, 0, 0))
+                    p.drawRect(QRectF(ex - pw * 0.16 + lx * 0.78, cy - ph * 0.16 + ly * 0.78, pw * 0.38, ph * 0.38))
+                elif eye_style == "cat_slit":
+                    p.setBrush(col)
+                    p.drawEllipse(QPointF(ex, cy), ew * 1.05, eh * 1.05)
+                    p.setBrush(QColor(0, 0, 0))
+                    p.drawEllipse(QPointF(ex + lx * 0.62, cy + ly * 0.52), ew * 0.28, eh * 0.78)
+                elif eye_style == "angry":
+                    p.setBrush(col)
+                    p.drawEllipse(QPointF(ex + lx * 0.45, cy + ly * 0.45), ew, eh * 0.85)
+                    p.setBrush(QColor(0, 0, 0))
+                    p.drawEllipse(QPointF(ex + lx * 0.78, cy + ly * 0.78), ew * 0.44, eh * 0.44)
+                    p.setPen(QPen(col, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    brow_y = cy - eh * 0.92
+                    p.drawLine(QPointF(ex - sx * ew * 0.85, brow_y + eh * 0.36), QPointF(ex + sx * ew * 0.95, brow_y - eh * 0.22))
+                    p.setPen(Qt.PenStyle.NoPen)
+                elif eye_style == "neon":
+                    glow = QColor(col)
+                    glow.setAlpha(95)
+                    p.setBrush(glow)
+                    p.drawEllipse(QPointF(ex + lx * 0.45, cy + ly * 0.45), ew * 1.42, eh * 1.32)
+                    p.setBrush(col)
+                    p.drawEllipse(QPointF(ex + lx * 0.55, cy + ly * 0.55), ew * 0.92, eh * 0.92)
+                    p.setBrush(QColor(255, 255, 255, 235))
+                    p.drawEllipse(QPointF(ex + lx * 0.75 - ew * 0.18, cy + ly * 0.75 - eh * 0.2), ew * 0.28, eh * 0.28)
+                else:
+                    p.setBrush(col)
+                    p.drawEllipse(QPointF(ex, cy), ew, eh)
+                    p.setBrush(QColor(10, 14, 24))
+                    p.drawEllipse(QPointF(ex + lx * 0.65, cy + ly * 0.65), ew * 0.52, eh * 0.46)
+                    p.setBrush(QColor(255, 255, 255, 235))
+                    p.drawEllipse(QPointF(ex + lx * 0.65 - ew * 0.16, cy + ly * 0.65 - eh * 0.18), ew * 0.18, eh * 0.16)
+        p.restore()
+
     def paint_island_top_addon(self, p: QPainter, core: QRectF, char_center_x: float) -> None:
         """Draw big hands/paws/tentacles/tails sticking DOWN out of the bottom of the collapsed black island."""
         spec = self._BUILTIN_SPECS.get(self.character_id)
