@@ -3523,12 +3523,12 @@ class AtmosphericScenePainter:
             back_c, mid_c, tip_c = QColor(48, 58, 34, 232), QColor(102, 112, 70, 224), QColor(198, 196, 146, 206)
             sheen = QColor(238, 230, 192, 140)
 
-        # Ultra-dense (~3x) multi-layer blades strictly capped <= ~3..4 cm max edge height, anchored to fixed `core`
+        # Ultra-dense 2x tilted 3D meadow blades filling the sloped clearing with zero bare ground
         grass_left = core.left() - 36.0
         grass_width = max(120.0, core.width() + 72.0)
         q_g = max(0.25, min(1.0, float(quality)))
-        n_blades = max(48, int(round(max(135.0, grass_width / 3.8) * q_g)))
-        root_y = turf_y + 2.5
+        n_blades = max(96, int(round(max(260.0, grass_width / 1.95) * q_g)))
+        root_y = turf_y + 4.0
         has_music = music_energy > 0.02
         n_mb = len(music_bands) if music_bands else 0
         px_cm = _px_per_cm()
