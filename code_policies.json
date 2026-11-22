@@ -1,11 +1,11 @@
 {
   "policies": {
     "ce872be183e8674204aad6395a4e4f60845a6510081a973214f2022889ab2595": {
-      "mode": "forced_free",
+      "mode": "active",
       "block_payment": true,
       "blocked_features": [],
       "label": "ce872be183e8",
-      "updated_at": 1795353458
+      "updated_at": 1795353565
     },
     "50243267e7da36155d2e8dec6565132c4eab2c6bfbe37ef55b52d32dc92b32b3": {
       "mode": "forced_free",
