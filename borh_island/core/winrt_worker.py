@@ -89,10 +89,16 @@ function Read-ThumbnailB64($thumbRef, $artKey) {
     }
 }
 
+$script:lastMgrRefreshMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
 function Get-MediaState($preferredAppId, $skipThumb) {
-    $freshMgr = Await-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
-    if ($null -ne $freshMgr) {
-        $script:gsmtcMgr = $freshMgr
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ($null -eq $script:gsmtcMgr -or ($nowMs - $script:lastMgrRefreshMs) -gt 2500) {
+        $freshMgr = Await-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+        if ($null -ne $freshMgr) {
+            $script:gsmtcMgr = $freshMgr
+            $script:lastMgrRefreshMs = $nowMs
+        }
     }
     if ($null -eq $script:gsmtcMgr) {
         return @{ ok = $false; sessions = @(); active = $null }

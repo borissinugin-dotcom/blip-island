@@ -2758,8 +2758,8 @@ class IslandWindow(QWidget):
 
         near_grass = (
             self._expanded
-            and core.left() <= local.x() <= core.right()
-            and core.bottom() - 50.0 <= local.y() <= core.bottom()
+            and core.left() - 36.0 <= local.x() <= core.right() + 36.0
+            and core.bottom() - 185.0 <= local.y() <= core.bottom() + 6.0
         )
         near_sky = (
             self._expanded
@@ -3681,9 +3681,24 @@ class IslandWindow(QWidget):
                 base_key = (id(active_tab), sub_mode, self.width(), self.height(), round(core.x(), 1), round(core.y(), 1))
                 gc_key = (base_key, tab_v_scroll)
                 cached_gc = getattr(self, "_glass_geo_cache", None)
-                if cached_gc is not None and cached_gc[0] == gc_key and (now_gc - cached_gc[1]) < 0.035:
+                tpl_cache = getattr(self, "_glass_tpl_cache", None)
+                if cached_gc is not None and cached_gc[0] == gc_key and (now_gc - cached_gc[1]) < 0.45:
                     card_targets = list(cached_gc[2])
                     btn_targets = list(cached_gc[3])
+                elif tpl_cache is not None and tpl_cache[0] == base_key and (now_gc - tpl_cache[1]) < 0.45:
+                    _, _, cap_vals, tpl_cards, tpl_btns = tpl_cache
+                    deltas = {k: float(cur_vals.get(k, 0) - cap_vals.get(k, 0)) for k in cap_vals}
+                    for r, rad, clip_r, op, sb_id in tpl_cards:
+                        dy = deltas.get(sb_id, 0.0) if sb_id is not None else 0.0
+                        rr = r.translated(0.0, -dy) if dy != 0.0 else r
+                        if core.intersects(rr) and (clip_r is None or rr.intersects(clip_r)):
+                            card_targets.append((rr, rad, clip_r, op))
+                    for r, rad, clip_r, op, sb_id in tpl_btns:
+                        dy = deltas.get(sb_id, 0.0) if sb_id is not None else 0.0
+                        rr = r.translated(0.0, -dy) if dy != 0.0 else r
+                        if core.intersects(rr) and (clip_r is None or rr.intersects(clip_r)):
+                            btn_targets.append((rr, rad, clip_r, op))
+                    self._glass_geo_cache = (gc_key, now_gc, list(card_targets), list(btn_targets))
                 else:
                     tab_tl = active_tab.mapTo(self, QPoint(0, 0))
                     out_tpl: tuple[list, list] = ([], [])
@@ -4183,7 +4198,7 @@ class IslandWindow(QWidget):
                 elif live_scene_motion or use_weather_atmo:
                     max_age = max(min_paint_dt, 0.016)
                 else:
-                    max_age = 0.035
+                    max_age = 0.25
                 if scroll_running:
                     surf_age = 0.075
                 elif live_scene_motion or use_weather_atmo:

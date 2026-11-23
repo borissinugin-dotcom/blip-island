@@ -1692,7 +1692,7 @@ class GrassSkeletonSim:
         wind_rad_amp = 0.088 if wet else 0.056
         has_music = music_energy > 0.02
         n_mb = len(music_bands) if music_bands else 0
-        part_radius = 28.0
+        part_radius = 48.0
         sub_dt = dt_eff * 0.5
         any_moving = False
         out: list[tuple[float, float, float, float]] = []
@@ -1709,8 +1709,8 @@ class GrassSkeletonSim:
         max_h_cap = _px_per_cm() * 6.98
         wet_h_mult = 1.06 if wet else 1.0
         wind_freq = 2.05 if wet else 1.32
-        ease_r = min(1.0, dt_eff * 5.2)
-        follow = min(1.0, dt_eff * 15.0)
+        ease_r = min(1.0, dt_eff * 5.8)
+        follow = min(1.0, dt_eff * 24.0)
         angles = self.angles
         ang_vels = self.ang_vels
         curls = self.curls
@@ -1771,9 +1771,9 @@ class GrassSkeletonSim:
                         sides[i] = side
                     bell = 0.5 * (1.0 + m_cos(math.pi * adx / part_radius)) * vert_inf
                     hit_frac = max(0.18, min(1.0, (root_y - cy_val) / max(20.0, bh)))
-                    swipe = max(-0.20, min(0.20, self._cursor_vx / 1850.0)) * bell
-                    goal_ang = rest_angle + side * bell * (0.78 + 0.44 * (1.0 - hit_frac * 0.55)) + swipe
-                    goal_crl = rest_curl + side * bell * (0.36 + 0.48 * hit_frac)
+                    swipe = max(-0.28, min(0.28, self._cursor_vx / 1350.0)) * bell
+                    goal_ang = rest_angle + side * bell * (1.08 + 0.44 * (1.0 - hit_frac * 0.45)) + swipe
+                    goal_crl = rest_curl + side * bell * (0.54 + 0.54 * hit_frac)
                     t_ang += (goal_ang - t_ang) * follow
                     t_crl += (goal_crl - t_crl) * follow
                 else:
@@ -1787,11 +1787,11 @@ class GrassSkeletonSim:
                 t_ang += (rest_angle - t_ang) * ease_r
                 t_crl += (rest_curl - t_crl) * ease_r
 
-            # Asymmetric critically-damped recovery (k=28, c=11.4 -> zeta > 1.0: zero overshoot / whip-back)
-            k_a = 84.0 if pushed else 28.0
-            c_a = 16.5 if pushed else 11.4
-            k_c = 98.0 if pushed else 32.0
-            c_c = 17.8 if pushed else 12.2
+            # Asymmetric critically-damped recovery (fast push response, smooth recovery)
+            k_a = 128.0 if pushed else 28.0
+            c_a = 19.5 if pushed else 11.4
+            k_c = 138.0 if pushed else 32.0
+            c_c = 20.5 if pushed else 12.2
 
             for _ in range(2):
                 acc = (t_ang - ang) * k_a - avel * c_a
@@ -3491,17 +3491,17 @@ class AtmosphericScenePainter:
                 p.setPen(QPen(QColor(214, 236, 255, ra), 1.0))
                 p.drawEllipse(QPointF(rx, ry), rad, rad * 0.25)
 
-        # Inverted vertical gradient: gentle touch near the top, very strong parting toward the bottom (strictly inside island!)
-        top_y = turf_y - 52.0
+        # Full-height grass interaction zone across all visible blade heights (strictly inside island bottom!)
+        top_y = turf_y - 185.0
         has_cursor = (
             cursor_local is not None
             and eff_left <= cursor_local.x() <= (eff_left + eff_width)
-            and top_y <= cursor_local.y() <= (turf_y + 10.0)
+            and top_y <= cursor_local.y() <= (turf_y + 8.0)
         )
         vert_inf = 0.0
         if has_cursor and cursor_local is not None:
             t_vert = max(0.0, min(1.0, (cursor_local.y() - top_y) / max(1.0, turf_y - top_y)))
-            vert_inf = 0.14 + 0.86 * (t_vert ** 1.35)
+            vert_inf = 0.72 + 0.38 * (t_vert ** 0.65)
 
         # Realistic natural botanical tones (back occluded -> rich mid meadow -> sunlit/wet/frosted front)
         if wet:
@@ -3767,20 +3767,22 @@ class AtmosphericScenePainter:
             def _draw_canopy(cp: QPainter) -> None:
                 cp.setPen(Qt.PenStyle.NoPen)
                 cp_draw = cp.drawPath
-                fp = QPainterPath()
-                fp_clear = fp.clear
-                fp_move = fp.moveTo
-                fp_quad = fp.quadTo
-                fp_close = fp.closeSubpath
                 for sh_i in range(6):
-                    cp.setBrush(canopy_grads[sh_i])
-                    for l0x, l0y, cx1, cy1, tx_b, ty_b, cx2, cy2, r0x, r0y in shade_buckets[sh_i]:
-                        fp_clear()
+                    bucket = shade_buckets[sh_i]
+                    if not bucket:
+                        continue
+                    fp = QPainterPath()
+                    fp.setFillRule(Qt.FillRule.WindingFill)
+                    fp_move = fp.moveTo
+                    fp_quad = fp.quadTo
+                    fp_close = fp.closeSubpath
+                    for l0x, l0y, cx1, cy1, tx_b, ty_b, cx2, cy2, r0x, r0y in bucket:
                         fp_move(l0x, l0y)
                         fp_quad(cx1, cy1, tx_b, ty_b)
                         fp_quad(cx2, cy2, r0x, r0y)
                         fp_close()
-                        cp_draw(fp)
+                    cp.setBrush(canopy_grads[sh_i])
+                    cp_draw(fp)
                 if has_ribs:
                     cp.setBrush(Qt.BrushStyle.NoBrush)
                     cp.setPen(QPen(rib_col, 0.85 if wet else 0.56))
@@ -4066,11 +4068,11 @@ class AtmosphericScenePainter:
         wind_force = max(0.0, min(1.0, abs(float(wind_ms)) / 20.0))
         wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
 
-        # -1. Distant misty 2D conifer forest spanning full liquid stretch width (-180..+180 beyond core)
+        # -1. Distant misty 2D conifer forest spanning full liquid stretch width (-190..+190 beyond core)
         horizon_y = turf_y + 4.0 * sc
-        pad_forest_x = 180.0
+        pad_forest_x = 190.0
         f_w = max(64, int(math.ceil(core.width() + pad_forest_x * 2.0)))
-        f_h = max(160, int(math.ceil(280.0 * sc)))
+        f_h = max(160, int(math.ceil(290.0 * sc)))
         forest_key = (f_w, f_h, round(light_w * 10.0), round(snow_amt * 8.0), round(sc, 2))
         cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
         if cache_dict is None:
@@ -4081,57 +4083,90 @@ class AtmosphericScenePainter:
             if len(cache_dict) > 6:
                 cache_dict.clear()
             cached_layers = []
-            for layer_idx, (l_scale, l_alpha, y_off) in enumerate(((0.74, 125, 0.0), (0.96, 180, 6.0))):
+            layer_specs = (
+                (0.68, 125, 0.0, (24, 68, 52), (16, 46, 36)),
+                (0.86, 175, 4.0, (20, 60, 44), (11, 36, 26)),
+                (1.04, 220, 8.0, (16, 52, 36), (8, 28, 20)),
+            )
+            for layer_idx, (l_scale, l_alpha, y_off, top_rgb, bot_rgb) in enumerate(layer_specs):
                 img_f = QImage(f_w, f_h, QImage.Format.Format_ARGB32_Premultiplied)
                 img_f.fill(0)
                 fp_p = QPainter(img_f)
                 fp_p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                if layer_idx == 0:
-                    f_col = QColor(
-                        int(round(22 * (1.0 - light_w * 0.65) + 36 * snow_amt)),
-                        int(round(64 * (1.0 - light_w * 0.62) + 38 * snow_amt)),
-                        int(round(46 * (1.0 - light_w * 0.48) + 46 * snow_amt)),
-                        l_alpha,
-                    )
-                else:
-                    f_col = QColor(
-                        int(round(15 * (1.0 - light_w * 0.62) + 26 * snow_amt)),
-                        int(round(52 * (1.0 - light_w * 0.60) + 28 * snow_amt)),
-                        int(round(34 * (1.0 - light_w * 0.45) + 34 * snow_amt)),
-                        l_alpha,
-                    )
+                c_top = QColor(
+                    int(round(top_rgb[0] * (1.0 - light_w * 0.62) + 32 * snow_amt)),
+                    int(round(top_rgb[1] * (1.0 - light_w * 0.58) + 36 * snow_amt)),
+                    int(round(top_rgb[2] * (1.0 - light_w * 0.46) + 42 * snow_amt)),
+                    l_alpha,
+                )
+                c_bot = QColor(
+                    int(round(bot_rgb[0] * (1.0 - light_w * 0.62) + 18 * snow_amt)),
+                    int(round(bot_rgb[1] * (1.0 - light_w * 0.58) + 22 * snow_amt)),
+                    int(round(bot_rgb[2] * (1.0 - light_w * 0.46) + 28 * snow_amt)),
+                    min(250, l_alpha + 25),
+                )
+                f_grad = QLinearGradient(QPointF(0.0, float(f_h) * 0.15), QPointF(0.0, float(f_h)))
+                f_grad.setColorAt(0.0, c_top)
+                f_grad.setColorAt(1.0, c_bot)
+                trunk_batch = QPainterPath()
+                trunk_batch.setFillRule(Qt.FillRule.WindingFill)
                 batched = QPainterPath()
                 batched.setFillRule(Qt.FillRule.WindingFill)
+                ridge_batch = QPainterPath()
+                ridge_batch.setFillRule(Qt.FillRule.WindingFill)
                 snow_batched = QPainterPath()
                 snow_batched.setFillRule(Qt.FillRule.WindingFill)
-                step_f = 30.0 * sc * l_scale
-                n_trees_bg = int(f_w / max(10.0, step_f)) + 3
+                step_f = 28.0 * sc * l_scale
+                n_trees_bg = int(f_w / max(9.0, step_f)) + 4
                 base_fy = float(f_h) - 2.0
                 for fi in range(n_trees_bg):
-                    fx = 12.0 + fi * step_f + ((fi * 17) % 7) * 2.2 * sc
-                    fh = (145.0 + ((fi * 31 + layer_idx * 19) % 88)) * sc * l_scale
-                    fw = (52.0 + ((fi * 13) % 22)) * sc * l_scale
-                    # Lush 5-tier filled 2D spruce silhouette (WindingFill eliminates hollow overlap triangles)
-                    for t_i in range(5):
-                        t_top_y = base_fy - fh * (1.0 - t_i * 0.17)
-                        t_bot_y = base_fy - fh * (0.64 - t_i * 0.16)
-                        t_hw = fw * (0.28 + t_i * 0.16)
+                    fx = 8.0 + fi * step_f + ((fi * 19 + layer_idx * 11) % 9 - 4) * 1.9 * sc
+                    fh = (138.0 + ((fi * 37 + layer_idx * 23) % 92)) * sc * l_scale
+                    fw = (48.0 + ((fi * 17 + layer_idx * 7) % 24)) * sc * l_scale
+                    tw_f = max(3.5, fw * 0.13)
+                    trunk_batch.addRoundedRect(QRectF(fx - tw_f * 0.5, base_fy - fh * 0.32, tw_f, fh * 0.34), 2.0, 2.0)
+                    # Detailed 6-tier jagged spruce boughs with feathered branch tips
+                    n_tiers = 6
+                    for t_i in range(n_tiers):
+                        u_t = t_i / float(n_tiers - 1)
+                        t_top_y = base_fy - fh * (1.0 - u_t * 0.72)
+                        t_bot_y = base_fy - fh * (0.74 - u_t * 0.64)
+                        t_hw = fw * (0.22 + u_t * 0.56)
                         batched.moveTo(fx, t_top_y)
-                        batched.quadTo(fx + t_hw * 0.58, t_top_y + (t_bot_y - t_top_y) * 0.55, fx + t_hw, t_bot_y)
-                        batched.quadTo(fx, t_bot_y + 7.0 * sc, fx - t_hw, t_bot_y)
-                        batched.quadTo(fx - t_hw * 0.58, t_top_y + (t_bot_y - t_top_y) * 0.55, fx, t_top_y)
+                        batched.quadTo(fx + t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx + t_hw, t_bot_y - 2.5 * sc)
+                        n_teeth = 5 + (t_i // 2)
+                        for j_t in range(n_teeth * 2 + 1):
+                            fr_t = j_t / float(n_teeth * 2)
+                            bx_t = (fx + t_hw) - fr_t * (t_hw * 2.0)
+                            tooth = (4.2 * sc * l_scale) if (j_t % 2 == 1) else (-1.8 * sc * l_scale)
+                            arch = math.sin(fr_t * math.pi) * (4.5 * sc * l_scale)
+                            batched.lineTo(bx_t, t_bot_y + tooth + arch)
+                        batched.quadTo(fx - t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx, t_top_y)
                         batched.closeSubpath()
-                    if snow_amt > 0.15 and layer_idx == 1:
+                        if layer_idx >= 1 and t_i < 5:
+                            rh_w = t_hw * 0.64
+                            ridge_batch.moveTo(fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
+                            ridge_batch.quadTo(fx + rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx + rh_w, t_bot_y - 3.0 * sc)
+                            ridge_batch.quadTo(fx, t_bot_y + 1.5 * sc, fx - rh_w, t_bot_y - 3.0 * sc)
+                            ridge_batch.quadTo(fx - rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
+                            ridge_batch.closeSubpath()
+                    if snow_amt > 0.15 and layer_idx >= 1:
                         snow_batched.moveTo(fx, base_fy - fh)
                         snow_batched.quadTo(fx + fw * 0.18, base_fy - fh * 0.86, fx + fw * 0.24, base_fy - fh * 0.78)
                         snow_batched.quadTo(fx, base_fy - fh * 0.75, fx - fw * 0.24, base_fy - fh * 0.78)
                         snow_batched.quadTo(fx - fw * 0.18, base_fy - fh * 0.86, fx, base_fy - fh)
                         snow_batched.closeSubpath()
                 fp_p.setPen(Qt.PenStyle.NoPen)
-                fp_p.setBrush(f_col)
+                fp_p.setBrush(QColor(int(48 * (1.0 - light_w * 0.5)), int(30 * (1.0 - light_w * 0.5)), int(20 * (1.0 - light_w * 0.4)), l_alpha))
+                fp_p.drawPath(trunk_batch)
+                fp_p.setBrush(f_grad)
                 fp_p.drawPath(batched)
+                if not ridge_batch.isEmpty():
+                    hi_c = QColor(min(255, c_top.red() + 14), min(255, c_top.green() + 22), min(255, c_top.blue() + 14), int(l_alpha * 0.52))
+                    fp_p.setBrush(hi_c)
+                    fp_p.drawPath(ridge_batch)
                 if not snow_batched.isEmpty():
-                    fp_p.setBrush(QColor(232, 242, 255, int(round(105 * snow_amt))))
+                    fp_p.setBrush(QColor(232, 242, 255, int(round(115 * snow_amt))))
                     fp_p.drawPath(snow_batched)
                 fp_p.end()
                 cached_layers.append((img_f, y_off))
@@ -4393,87 +4428,90 @@ class AtmosphericScenePainter:
                 p.drawPath(ic_p)
         p.restore()
 
-        # Helper for seasonal deciduous leafy trees with wind bend + individual fluttering leaves
+        # Lush 2D layered deciduous trees with sculpted cloud-foliage crowns & gentle wind sway (zero polka-dot loops)
         leafy_vis = max(0.0, 1.0 - max(snow_amt, tree_vis if snow_amt > 0.1 else 0.0))
         if leafy_vis > 0.02:
             def _draw_leafy_tree(tx_l: float, scale_t: float, seed_off: float) -> None:
                 p.save()
                 p.setOpacity(leafy_vis)
-                by_l = turf_y + 10.0 * sc
+                by_l = turf_y + 8.0 * sc
                 ts = sc * scale_t
-                gust = math.sin(phase_t * (1.8 + wind_force * 2.6) + seed_off)
-                lean = wind_dir * (3.0 + 26.0 * (wind_force ** 1.35)) * ts + gust * (3.0 + 7.5 * wind_force) * ts
+                gust = math.sin(phase_t * (1.5 + wind_force * 2.2) + seed_off)
+                lean = wind_dir * (2.5 + 22.0 * (wind_force ** 1.35)) * ts + gust * (2.5 + 6.5 * wind_force) * ts
 
-                # Curved bending trunk & forked branches
+                # Tapered wood trunk with natural root flare & gracefully forked branches
                 p.setPen(Qt.PenStyle.NoPen)
-                tr_g = QLinearGradient(QPointF(tx_l - 10 * ts, by_l), QPointF(tx_l + 10 * ts, by_l))
-                tr_g.setColorAt(0.0, QColor(88, 56, 34))
-                tr_g.setColorAt(0.5, QColor(118, 76, 46))
-                tr_g.setColorAt(1.0, QColor(64, 40, 24))
+                tr_g = QLinearGradient(QPointF(tx_l - 12 * ts, by_l), QPointF(tx_l + 12 * ts, by_l))
+                tr_g.setColorAt(0.0, QColor(96, 62, 38))
+                tr_g.setColorAt(0.45, QColor(122, 80, 50))
+                tr_g.setColorAt(1.0, QColor(58, 36, 22))
                 p.setBrush(tr_g)
                 trunk_p = QPainterPath()
-                trunk_p.moveTo(tx_l - 12.0 * ts, by_l + 4.0)
-                trunk_p.quadTo(tx_l - 6.0 * ts + lean * 0.25, by_l - 58.0 * ts, tx_l - 5.0 * ts + lean * 0.65, by_l - 120.0 * ts)
-                trunk_p.lineTo(tx_l + 5.0 * ts + lean * 0.65, by_l - 120.0 * ts)
-                trunk_p.quadTo(tx_l + 6.0 * ts + lean * 0.25, by_l - 58.0 * ts, tx_l + 12.0 * ts, by_l + 4.0)
+                trunk_p.moveTo(tx_l - 14.0 * ts, by_l + 4.0)
+                trunk_p.quadTo(tx_l - 6.5 * ts + lean * 0.22, by_l - 54.0 * ts, tx_l - 4.5 * ts + lean * 0.60, by_l - 118.0 * ts)
+                trunk_p.lineTo(tx_l + 4.5 * ts + lean * 0.60, by_l - 118.0 * ts)
+                trunk_p.quadTo(tx_l + 6.5 * ts + lean * 0.22, by_l - 54.0 * ts, tx_l + 14.0 * ts, by_l + 4.0)
                 trunk_p.closeSubpath()
                 p.drawPath(trunk_p)
-                p.setPen(QPen(QColor(92, 58, 34), max(2.0, 4.8 * ts), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.drawLine(QPointF(tx_l + lean * 0.48, by_l - 92.0 * ts), QPointF(tx_l - 38.0 * ts + lean * 0.85, by_l - 138.0 * ts))
-                p.drawLine(QPointF(tx_l + lean * 0.50, by_l - 96.0 * ts), QPointF(tx_l + 40.0 * ts + lean * 0.85, by_l - 140.0 * ts))
-                p.drawLine(QPointF(tx_l + lean * 0.62, by_l - 116.0 * ts), QPointF(tx_l - 12.0 * ts + lean * 0.92, by_l - 160.0 * ts))
-                p.drawLine(QPointF(tx_l + lean * 0.62, by_l - 116.0 * ts), QPointF(tx_l + 14.0 * ts + lean * 0.92, by_l - 162.0 * ts))
 
-                # Natural multi-shaded inner canopy (no dark center dot!) + 240 batched fluttering leaves
-                c_mid = QColor(34, 148, 72)
-                c_hi = QColor(52, 178, 90)
-                if light_w > 0.25:
-                    c_mid = c_mid.darker(int(100 + 68 * light_w))
-                    c_hi = c_hi.darker(int(100 + 68 * light_w))
+                p.setPen(QPen(QColor(82, 52, 32), max(2.0, 4.4 * ts), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(tx_l + lean * 0.42, by_l - 86.0 * ts), QPointF(tx_l - 36.0 * ts + lean * 0.82, by_l - 134.0 * ts))
+                p.drawLine(QPointF(tx_l + lean * 0.46, by_l - 90.0 * ts), QPointF(tx_l + 38.0 * ts + lean * 0.82, by_l - 136.0 * ts))
+                p.drawLine(QPointF(tx_l + lean * 0.58, by_l - 112.0 * ts), QPointF(tx_l - 14.0 * ts + lean * 0.90, by_l - 160.0 * ts))
+                p.drawLine(QPointF(tx_l + lean * 0.58, by_l - 112.0 * ts), QPointF(tx_l + 16.0 * ts + lean * 0.90, by_l - 162.0 * ts))
+
+                # 3-tier sculpted 2D foliage canopy domes (deep shadow base -> rich emerald mid -> sunlit top crown)
+                dim_f = int(100 + 68 * light_w) if light_w > 0.22 else 100
+                c_shadow = QColor(16, 78, 42).darker(dim_f)
+                c_deep = QColor(22, 108, 56).darker(dim_f)
+                c_mid = QColor(32, 138, 70).darker(dim_f)
+                c_bright = QColor(54, 168, 88).darker(dim_f)
+                c_rim = QColor(94, 204, 122, 185).darker(dim_f)
+
+                cx_c = tx_l + lean * 0.88
+                cy_c = by_l - 156.0 * ts
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(c_mid)
-                p.drawEllipse(QPointF(tx_l + lean * 0.86 - 22.0 * ts, by_l - 154.0 * ts), 38.0 * ts, 30.0 * ts)
-                p.drawEllipse(QPointF(tx_l + lean * 0.86 + 22.0 * ts, by_l - 156.0 * ts), 38.0 * ts, 30.0 * ts)
-                p.setBrush(c_hi)
-                p.drawEllipse(QPointF(tx_l + lean * 0.92, by_l - 176.0 * ts), 42.0 * ts, 32.0 * ts)
 
-                leaf_colors = (
-                    QColor(21, 128, 61),
-                    QColor(22, 163, 74),
-                    QColor(34, 197, 94),
-                    QColor(74, 222, 128),
-                    QColor(134, 239, 172),
-                )
-                leaf_paths = [QPainterPath() for _ in range(5)]
-                n_leaves = 240
-                for li in range(n_leaves):
-                    ang_c = ((li * 2.39996) + seed_off) % 6.28318
-                    rad_c = math.sqrt((li + 0.5) / float(n_leaves))
-                    lx = tx_l + lean * (0.78 + 0.22 * rad_c) + math.cos(ang_c) * 74.0 * ts * rad_c
-                    ly = (by_l - 164.0 * ts) + math.sin(ang_c) * 54.0 * ts * rad_c
-                    flutter = math.sin(phase_t * (3.0 + wind_force * 4.8) + li * 1.37 + seed_off)
-                    lx += flutter * (2.0 + 5.2 * wind_force) * ts
-                    ly += math.cos(phase_t * 2.5 + li * 0.95) * (1.3 + 2.4 * wind_force) * ts
-                    l_ang = ang_c + flutter * (0.36 + 0.48 * wind_force)
-                    ca, sa = math.cos(l_ang), math.sin(l_ang)
-                    hlw = (5.2 + (li % 3) * 1.3) * ts
-                    hlh = (5.5 + (li % 2) * 1.4) * ts
-                    p0x, p0y = lx - hlw * ca, ly - hlw * sa
-                    p1x, p1y = lx + hlw * ca, ly + hlw * sa
-                    c1x, c1y = lx + hlh * sa, ly - hlh * ca
-                    c2x, c2y = lx - hlh * sa, ly + hlh * ca
-                    depth_idx = 0 if li < 45 else (1 + (li % 4))
-                    lp = leaf_paths[depth_idx]
-                    lp.moveTo(p0x, p0y)
-                    lp.quadTo(c1x, c1y, p1x, p1y)
-                    lp.quadTo(c2x, c2y, p0x, p0y)
-                for idx_c, lp in enumerate(leaf_paths):
-                    lcol = leaf_colors[idx_c]
-                    if light_w > 0.25:
-                        lcol = lcol.darker(int(100 + 68 * light_w))
-                    p.setPen(QPen(lcol.darker(145), 0.65))
-                    p.setBrush(lcol)
-                    p.drawPath(lp)
+                # Back/lower shadow foliage clusters
+                p.setBrush(c_shadow)
+                for ox, oy, rx, ry in (
+                    (-38.0, 20.0, 32.0, 22.0),
+                    (38.0, 20.0, 32.0, 22.0),
+                    (0.0, 24.0, 44.0, 24.0),
+                    (-24.0, 4.0, 36.0, 26.0),
+                    (26.0, 4.0, 36.0, 26.0),
+                ):
+                    p.drawEllipse(QPointF(cx_c + ox * ts, cy_c + oy * ts), rx * ts, ry * ts)
+
+                # Mid emerald foliage puffs with soft vertical gradient
+                mid_g = QLinearGradient(QPointF(cx_c, cy_c - 38.0 * ts), QPointF(cx_c, cy_c + 24.0 * ts))
+                mid_g.setColorAt(0.0, c_mid)
+                mid_g.setColorAt(1.0, c_deep)
+                p.setBrush(mid_g)
+                for ox, oy, rx, ry in (
+                    (-32.0, 6.0, 30.0, 23.0),
+                    (32.0, 8.0, 30.0, 23.0),
+                    (-18.0, -12.0, 34.0, 26.0),
+                    (20.0, -10.0, 34.0, 26.0),
+                    (0.0, 4.0, 38.0, 27.0),
+                    (0.0, -24.0, 32.0, 24.0),
+                ):
+                    p.drawEllipse(QPointF(cx_c + ox * ts, cy_c + oy * ts), rx * ts, ry * ts)
+
+                # Sunlit upper-left & crown highlight domes
+                top_g = QLinearGradient(QPointF(cx_c - 20.0 * ts, cy_c - 46.0 * ts), QPointF(cx_c + 16.0 * ts, cy_c + 6.0 * ts))
+                top_g.setColorAt(0.0, c_rim)
+                top_g.setColorAt(0.45, c_bright)
+                top_g.setColorAt(1.0, c_mid)
+                p.setBrush(top_g)
+                for ox, oy, rx, ry in (
+                    (-24.0, -4.0, 22.0, 17.0),
+                    (-12.0, -20.0, 25.0, 19.0),
+                    (4.0, -28.0, 24.0, 18.0),
+                    (18.0, -14.0, 22.0, 17.0),
+                    (-4.0, -8.0, 26.0, 19.0),
+                ):
+                    p.drawEllipse(QPointF(cx_c + ox * ts, cy_c + oy * ts), rx * ts, ry * ts)
                 p.restore()
 
             _draw_leafy_tree(core.right() - 128.0 * sc, 0.92, 0.0)
