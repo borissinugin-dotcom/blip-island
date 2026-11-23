@@ -1666,14 +1666,14 @@ class IslandWindow(QWidget):
                 if not self._has_media:
                     base_w = 435
                 elif lyrics_on:
-                    lyric_px = self.pill_lyric_lbl.fontMetrics().horizontalAdvance(f"♪  {self._media_lyric}") + 36
+                    lyric_px = min(330, self.pill_lyric_lbl.fontMetrics().horizontalAdvance(f"♪  {self._media_lyric}") + 36)
                     base_w = max(720, 490 + lyric_px)
                 else:
                     base_w = 648
             elif self._has_media:
                 lyrics_on = bool(cfg.show_lyrics_in_pill and (self._playing or bool(self._media_lyric)) and self._media_lyric)
                 if lyrics_on:
-                    lyric_px = self.pill_lyric_lbl.fontMetrics().horizontalAdvance(f"♪  {self._media_lyric}") + 36
+                    lyric_px = min(330, self.pill_lyric_lbl.fontMetrics().horizontalAdvance(f"♪  {self._media_lyric}") + 36)
                     min_w = 560 if (cfg.pill_mode == "miniplayer" or self._hover_active) else 505
                     base_w = max(min_w, 260 + lyric_px)
                 elif cfg.pill_mode == "miniplayer" or self._hover_active:
@@ -1827,8 +1827,11 @@ class IslandWindow(QWidget):
             elif lyrics_on:
                 self.pill_text.setMaximumWidth(108 if in_game_now else 145)
                 self.pill_text.setText(self._media_song_only or self._media_title_full)
-                self.pill_lyric_lbl.setMaximumWidth(16777215)
-                self.pill_lyric_lbl.setText(f"♪  {self._media_lyric}")
+                self.pill_lyric_lbl.setMaximumWidth(330)
+                elided_lyr = self.pill_lyric_lbl.fontMetrics().elidedText(
+                    f"♪  {self._media_lyric}", Qt.TextElideMode.ElideRight, 316
+                )
+                self.pill_lyric_lbl.setText(elided_lyr)
                 _apply_lyric_chip_style(self.pill_lyric_lbl, self.palette.accent, in_strip=False)
                 self.pill_lyric_lbl.show()
             else:

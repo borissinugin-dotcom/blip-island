@@ -46,8 +46,8 @@ class LyricsResult:
 
 
 def parse_lrc(lrc_text: str) -> list[LyricLine]:
-    """Parse LRC string into timestamp-sorted LyricLine objects."""
-    lines: list[LyricLine] = []
+    """Parse LRC string into timestamp-sorted LyricLine objects, splitting multi-line verse blobs."""
+    raw_lines: list[LyricLine] = []
     for raw_line in lrc_text.splitlines():
         matches = list(_LRC_TAG_RE.finditer(raw_line))
         if not matches:
@@ -58,8 +58,23 @@ def parse_lrc(lrc_text: str) -> list[LyricLine]:
             secs = int(m.group(2))
             frac_s = m.group(3) or "0"
             frac = int(frac_s) / (10.0 ** len(frac_s))
-            lines.append(LyricLine(time_sec=mins * 60.0 + secs + frac, text=text or "♪"))
-    lines.sort(key=lambda ln: ln.time_sec)
+            raw_lines.append(LyricLine(time_sec=mins * 60.0 + secs + frac, text=text or "♪"))
+    raw_lines.sort(key=lambda ln: ln.time_sec)
+
+    lines: list[LyricLine] = []
+    for idx, ln in enumerate(raw_lines):
+        txt = ln.text.strip()
+        if len(txt) > 64:
+            # Split concatenated verse lines starting with a capital Russian/Latin word after space
+            parts = [p.strip() for p in re.split(r"(?<=[а-яёa-z.!?,;])\s+(?=[А-ЯЁA-Z][а-яёa-z]|(?:[А-ЯЁA-Z]\s+[а-яёa-z]))", txt) if p.strip()]
+            if len(parts) > 1:
+                next_t = raw_lines[idx + 1].time_sec if idx + 1 < len(raw_lines) else (ln.time_sec + len(parts) * 2.8)
+                span = max(1.0, next_t - ln.time_sec)
+                step = span / len(parts)
+                for p_i, part in enumerate(parts):
+                    lines.append(LyricLine(time_sec=ln.time_sec + p_i * step, text=part))
+                continue
+        lines.append(ln)
     return lines
 
 

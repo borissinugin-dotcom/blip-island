@@ -105,7 +105,7 @@ class BlipProWidget(QWidget):
         root.addWidget(self.reason_lbl)
 
         self.perks_lbl = QLabel(
-            "Стоимость Blip PRO: 300 ₽ за 3 месяца.\n"
+            "Стоимость Blip PRO: 10 ₽ за 3 месяца.\n"
             "Подписка PRO открывает:\n"
             "• Стекло Liquid Glass и Frost Glass\n"
             "• Погоду фона в реальном времени\n"
@@ -117,7 +117,7 @@ class BlipProWidget(QWidget):
         root.addWidget(self.perks_lbl)
 
         pay_row = QHBoxLayout()
-        self.qr_btn = QPushButton("Перейти к оплате — 300 ₽ / 3 мес")
+        self.qr_btn = QPushButton("Перейти к оплате — 10 ₽ / 3 мес")
         self.qr_btn.clicked.connect(self._start_web_payment)
         pay_row.addWidget(self.qr_btn)
 
@@ -186,7 +186,7 @@ class BlipProWidget(QWidget):
             self.qr_lbl.setVisible(False)
         else:
             self.qr_btn.setEnabled(True)
-            self.qr_btn.setText("Перейти к оплате — 300 ₽ / 3 мес")
+            self.qr_btn.setText("Перейти к оплате — 10 ₽ / 3 мес")
 
         self.master_btn.setVisible(bool(getattr(st, "is_master", False)))
 
@@ -195,7 +195,7 @@ class BlipProWidget(QWidget):
         elif st.tier == "TRIAL" and not reason:
             reason = (
                 f"У вас Trial-версия на 3 часа (осталось {format_trial_remaining(st.trial_days_left)}). "
-                "Оплатите 300 ₽ за 3 месяца, если хотите активировать Blip PRO сразу."
+                "Оплатите 10 ₽ за 3 месяца, если хотите активировать Blip PRO сразу."
             )
         if reason:
             self.reason_lbl.setText(reason)
