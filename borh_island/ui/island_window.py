@@ -4199,14 +4199,18 @@ class IslandWindow(QWidget):
                 _, _, min_paint_dt = self._fps_timing()
                 if is_sliding or fast_glass:
                     max_age = min_paint_dt
-                elif live_scene_motion or use_weather_atmo:
+                elif live_scene_motion:
                     max_age = max(min_paint_dt, 0.016)
+                elif use_weather_atmo:
+                    max_age = 0.055
                 else:
                     max_age = 0.25
                 if scroll_running:
                     surf_age = 0.075
-                elif live_scene_motion or use_weather_atmo:
+                elif live_scene_motion:
                     surf_age = max(min_paint_dt, 0.016)
+                elif use_weather_atmo:
+                    surf_age = 0.055
                 else:
                     surf_age = 0.50
                 is_video_stream = bool(

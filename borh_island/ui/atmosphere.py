@@ -2750,18 +2750,10 @@ class AtmosphericScenePainter:
 
         sim = cloud_sim
         is_transient = sim is None
-        if sim is None:
-            sim = CloudSmokeField(seed=17)
-            drift_arg = float(cloud_phase) if cloud_phase is not None else float(phase_t)
-            static_u = drift_arg * (0.004 + max(0.0, float(wind_ms)) * 0.022)
-            wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, dt=0.04, drift_offset=static_u, quality=quality, outer_rect=None)
-        else:
-            wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, quality=quality, outer_rect=None)
-
         night_scale = 0.72 if segment == "night" else 1.0
         base_opacity = (0.48 if weather_kind == "clear" else (0.76 if weather_kind == "partly" else (0.98 if (rain_mix > 0.25 or dark_fac > 0.55) else 0.88))) * night_scale
 
-        # Bilinear 0.30x offscreen smoke buffer compositor with temporal reuse when calm (~31 Hz smoke, 120+ FPS composite)
+        # Bilinear offscreen smoke buffer compositor with temporal reuse when calm (skips sim.step() on cache hit!)
         buf_x0 = x0 - 28.0
         buf_x1 = x0 + w + 28.0
         if outer_rect is not None and (outer_rect.left() < x0 - 2.0 or outer_rect.right() > x0 + w + 2.0):
@@ -2770,25 +2762,39 @@ class AtmosphericScenePainter:
         buf_y0 = y0 - 18.0
         buf_w = max(80.0, buf_x1 - buf_x0)
         buf_h = max(60.0, min(h * 0.62, 230.0) + 36.0)
-        buf_scale = 0.15 + 0.09 * max(0.25, min(1.0, float(quality)))
+        buf_scale = 0.16 + 0.09 * max(0.25, min(1.0, float(quality)))
         iw = max(16, int(math.ceil(buf_w * buf_scale)))
         ih = max(16, int(math.ceil(buf_h * buf_scale)))
 
         is_storm = weather_kind in ("thunder", "lightning")
         now_b = time.monotonic()
+        cursor_in_sky = (
+            cursor_local is not None
+            and cursor_local.x() > -120.0
+            and (y0 - 45.0) <= cursor_local.y() <= (y0 + 185.0)
+        )
         buf_key = (iw, ih, round(buf_x0), round(buf_y0), top_rgb, mid_rgb, belly_rgb, round(base_opacity, 2), is_storm, round(wind_ms, 1))
         if (
             not is_transient
+            and sim is not None
+            and not cursor_in_sky
             and not sim.is_dispersing()
             and sim._buf_img is not None
             and sim._buf_img.width() == iw
             and sim._buf_img.height() == ih
             and sim._buf_key == buf_key
-            and (now_b - sim._buf_ts) < 0.095
+            and (now_b - sim._buf_ts) < 0.085
         ):
             buf_target = sim._buf_img
             smoke_loci = sim._buf_loci
         else:
+            if sim is None:
+                sim = CloudSmokeField(seed=17)
+                drift_arg = float(cloud_phase) if cloud_phase is not None else float(phase_t)
+                static_u = drift_arg * (0.004 + max(0.0, float(wind_ms)) * 0.022)
+                wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, dt=0.04, drift_offset=static_u, quality=quality, outer_rect=None)
+            else:
+                wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, quality=quality, outer_rect=None)
             if is_transient:
                 if _SMOKE_BUF_IMG is None or _SMOKE_BUF_IMG.width() != iw or _SMOKE_BUF_IMG.height() != ih:
                     _SMOKE_BUF_IMG = QImage(iw, ih, QImage.Format.Format_ARGB32_Premultiplied)
@@ -3523,113 +3529,17 @@ class AtmosphericScenePainter:
             back_c, mid_c, tip_c = QColor(48, 58, 34, 232), QColor(102, 112, 70, 224), QColor(198, 196, 146, 206)
             sheen = QColor(238, 230, 192, 140)
 
-        # Ultra-dense 2x tilted 3D meadow blades filling the sloped clearing with zero bare ground
+        # Ultra-dense 2D meadow blades with early calm-cache short-circuit (skips grass_sim.step() when calm!)
         grass_left = core.left() - 36.0
         grass_width = max(120.0, core.width() + 72.0)
         q_g = max(0.25, min(1.0, float(quality)))
-        n_blades = max(96, int(round(max(260.0, grass_width / 1.95) * q_g)))
+        n_blades = max(88, int(round(max(210.0, grass_width / 2.45) * q_g)))
         root_y = turf_y + 4.0
         has_music = music_energy > 0.02
         n_mb = len(music_bands) if music_bands else 0
         px_cm = _px_per_cm()
         max_cm_px = px_cm * 6.98
 
-        if grass_sim is not None:
-            blade_states = grass_sim.step(
-                n_blades,
-                grass_left,
-                grass_width,
-                root_y,
-                wet,
-                phase_t,
-                cursor_local,
-                vert_inf,
-                has_cursor,
-                music_energy,
-                music_bands,
-            )
-            w_scales = grass_sim.w_scales
-            shade_indices = grass_sim.shade_indices
-        else:
-            blade_states = []
-            w_scales = []
-            shade_indices = []
-            part_radius = 28.0
-            wind_rad_amp = 0.088 if wet else 0.056
-            rng_st = random.Random(7331)
-            for i in range(n_blades):
-                frac = (i + 0.5) / n_blades
-                bx = grass_left + frac * grass_width + rng_st.uniform(-2.8, 2.8)
-                tier = rng_st.random()
-                cm_len = rng_st.uniform(0.85, 2.35) if tier < 0.35 else (rng_st.uniform(2.35, 4.75) if tier < 0.76 else rng_st.uniform(4.85, 6.92))
-                band_v = float(music_bands[min(n_mb - 1, int(frac * n_mb))]) if (has_music and n_mb > 0) else music_energy
-                music_h = (1.0 + 0.10 * music_energy + 0.16 * band_v) if has_music else 1.0
-                bh = min(max_cm_px, max(16.0, cm_len * px_cm) * (1.06 if wet else 1.0) * music_h)
-                wind_rad = math.sin(phase_t * (2.05 if wet else 1.32) + i * 0.43) * wind_rad_amp
-                if has_music:
-                    wind_rad += math.sin(phase_t * 3.8 + i * 0.55) * (0.036 + 0.09 * band_v + 0.048 * music_energy)
-                ang = rng_st.uniform(-0.14, 0.14) + wind_rad
-                crl = wind_rad * 0.55
-                if has_cursor and vert_inf > 0.02 and cursor_local is not None:
-                    dx = bx - cursor_local.x()
-                    adx = abs(dx)
-                    if adx < part_radius:
-                        bell = 0.5 * (1.0 + math.cos(math.pi * adx / part_radius)) * vert_inf
-                        side = (1.0 if dx >= 0.0 else -1.0) if adx > 3.5 else (1.0 if (i % 2 == 0) else -1.0)
-                        hit_frac = max(0.18, min(1.0, (root_y - cursor_local.y()) / max(20.0, bh)))
-                        ang += side * bell * (0.62 + 0.34 * (1.0 - hit_frac * 0.40))
-                        crl += side * bell * (0.36 + 0.48 * hit_frac)
-                blade_states.append((bx, bh, max(-1.38, min(1.38, ang)), max(-1.26, min(1.26, crl))))
-                w_scales.append(rng_st.uniform(0.60, 1.30))
-                shade_indices.append(i % 6)
-
-        # Fill side-stretched liquid bulge with seamless grass ONLY when cursor pulls bulge past core
-        has_bulge_ext = bool(
-            outer_rect is not None
-            and (outer_rect.left() < grass_left + 4.0 or outer_rect.right() > grass_left + grass_width - 4.0)
-        )
-        if has_bulge_ext and outer_rect is not None:
-            blade_states = list(blade_states)
-            w_scales = list(w_scales)
-            shade_indices = list(shade_indices)
-            ext_step = 4.6
-            ext_points: list[tuple[float, int]] = []
-            if outer_rect.left() < grass_left + 4.0:
-                k_lo = math.floor((outer_rect.left() - 12.0 - grass_left) / ext_step)
-                for k in range(k_lo, 0):
-                    ext_points.append((grass_left + k * ext_step, abs(k * 131 + 17)))
-            if outer_rect.right() > grass_left + grass_width - 4.0:
-                k_hi = math.ceil((outer_rect.right() + 12.0 - (grass_left + grass_width)) / ext_step)
-                right_base = grass_left + grass_width
-                for k in range(1, k_hi + 1):
-                    ext_points.append((right_base + k * ext_step, abs(k * 131 + 53)))
-            for bx, seed_v in ext_points:
-                r01 = ((seed_v * 1103515245 + 12345) & 0x7FFF) / 32767.0
-                r02 = ((seed_v * 214013 + 2531011) & 0x7FFF) / 32767.0
-                if r01 < 0.35:
-                    cm_len = 0.85 + r02 * 1.50
-                elif r01 < 0.76:
-                    cm_len = 2.35 + r02 * 2.40
-                else:
-                    cm_len = 4.85 + r02 * 2.07
-                bh = min(max_cm_px, max(16.0, cm_len * px_cm) * (1.06 if wet else 1.0))
-                w_rad = math.sin(phase_t * (2.05 if wet else 1.32) + seed_v * 0.43) * (0.088 if wet else 0.056)
-                ang = ((seed_v % 9) - 4) * 0.032 + w_rad
-                crl = w_rad * 0.55
-                if has_cursor and vert_inf > 0.02 and cursor_local is not None:
-                    dx_c = bx - cursor_local.x()
-                    adx_c = abs(dx_c)
-                    if adx_c < 44.0:
-                        bell_e = 0.5 * (1.0 + math.cos(math.pi * adx_c / 44.0)) * vert_inf
-                        push_dir = (1.0 if dx_c >= 0.0 else -1.0) if adx_c > 3.5 else (1.0 if (seed_v % 2 == 0) else -1.0)
-                        hit_f = max(0.18, min(1.0, (root_y - cursor_local.y()) / max(20.0, bh)))
-                        ang += push_dir * bell_e * (0.78 + 0.44 * (1.0 - hit_f * 0.55))
-                        crl += push_dir * bell_e * (0.36 + 0.48 * hit_f)
-                blade_states.append((bx, bh, max(-1.38, min(1.38, ang)), max(-1.26, min(1.26, crl))))
-                w_scales.append(0.60 + r02 * 0.70)
-                shade_indices.append(seed_v % 6)
-
-        # Calm meadow offscreen canopy layer cache on GrassSkeletonSim (covers side canvas cleanly for bulge/idle)
         can_x0 = min(grass_left - 24.0, eff_left - 8.0)
         can_x1 = max(grass_left + grass_width + 24.0, eff_right + 8.0)
         can_y0 = turf_y - max_cm_px - 16.0
@@ -3660,10 +3570,109 @@ class AtmosphericScenePainter:
             and grass_sim is not None
             and grass_sim._canopy_img is not None
             and grass_sim._canopy_key == can_key
-            and abs(phase_t - grass_sim._canopy_phase) < 0.048
+            and abs(phase_t - grass_sim._canopy_phase) < 0.085
         ):
             p.drawImage(QPointF(can_x0, can_y0), grass_sim._canopy_img)
         else:
+            if grass_sim is not None:
+                blade_states = grass_sim.step(
+                    n_blades,
+                    grass_left,
+                    grass_width,
+                    root_y,
+                    wet,
+                    phase_t,
+                    cursor_local,
+                    vert_inf,
+                    has_cursor,
+                    music_energy,
+                    music_bands,
+                )
+                w_scales = grass_sim.w_scales
+                shade_indices = grass_sim.shade_indices
+            else:
+                blade_states = []
+                w_scales = []
+                shade_indices = []
+                part_radius = 48.0
+                wind_rad_amp = 0.088 if wet else 0.056
+                rng_st = random.Random(7331)
+                for i in range(n_blades):
+                    frac = (i + 0.5) / n_blades
+                    bx = grass_left + frac * grass_width + rng_st.uniform(-2.8, 2.8)
+                    tier = rng_st.random()
+                    cm_len = rng_st.uniform(0.85, 2.35) if tier < 0.35 else (rng_st.uniform(2.35, 4.75) if tier < 0.76 else rng_st.uniform(4.85, 6.92))
+                    band_v = float(music_bands[min(n_mb - 1, int(frac * n_mb))]) if (has_music and n_mb > 0) else music_energy
+                    music_h = (1.0 + 0.10 * music_energy + 0.16 * band_v) if has_music else 1.0
+                    bh = min(max_cm_px, max(16.0, cm_len * px_cm) * (1.06 if wet else 1.0) * music_h)
+                    wind_rad = math.sin(phase_t * (2.05 if wet else 1.32) + i * 0.43) * wind_rad_amp
+                    if has_music:
+                        wind_rad += math.sin(phase_t * 3.8 + i * 0.55) * (0.036 + 0.09 * band_v + 0.048 * music_energy)
+                    ang = rng_st.uniform(-0.14, 0.14) + wind_rad
+                    crl = wind_rad * 0.55
+                    if has_cursor and vert_inf > 0.02 and cursor_local is not None:
+                        dx = bx - cursor_local.x()
+                        adx = abs(dx)
+                        if adx < part_radius:
+                            bell = 0.5 * (1.0 + math.cos(math.pi * adx / part_radius)) * vert_inf
+                            side = (1.0 if dx >= 0.0 else -1.0) if adx > 3.5 else (1.0 if (i % 2 == 0) else -1.0)
+                            hit_frac = max(0.18, min(1.0, (root_y - cursor_local.y()) / max(20.0, bh)))
+                            ang += side * bell * (0.62 + 0.34 * (1.0 - hit_frac * 0.40))
+                            crl += side * bell * (0.36 + 0.48 * hit_frac)
+                    blade_states.append((bx, bh, max(-1.38, min(1.38, ang)), max(-1.26, min(1.26, crl))))
+                    w_scales.append(rng_st.uniform(0.60, 1.30))
+                    shade_indices.append(i % 6)
+
+            has_bulge_ext = bool(
+                outer_rect is not None
+                and (outer_rect.left() < grass_left + 4.0 or outer_rect.right() > grass_left + grass_width - 4.0)
+            )
+            if has_bulge_ext and outer_rect is not None:
+                blade_states = list(blade_states)
+                w_scales = list(w_scales)
+                shade_indices = list(shade_indices)
+                ext_step = 5.2
+                ext_points: list[tuple[float, int]] = []
+                if outer_rect.left() < grass_left + 4.0:
+                    k_lo = math.floor((outer_rect.left() - 12.0 - grass_left) / ext_step)
+                    for k in range(k_lo, 0):
+                        ext_points.append((grass_left + k * ext_step, abs(k * 131 + 17)))
+                if outer_rect.right() > grass_left + grass_width - 4.0:
+                    k_hi = math.ceil((outer_rect.right() + 12.0 - (grass_left + grass_width)) / ext_step)
+                    right_base = grass_left + grass_width
+                    for k in range(1, k_hi + 1):
+                        ext_points.append((right_base + k * ext_step, abs(k * 131 + 53)))
+                for bx, seed_v in ext_points:
+                    r01 = ((seed_v * 1103515245 + 12345) & 0x7FFF) / 32767.0
+                    r02 = ((seed_v * 214013 + 2531011) & 0x7FFF) / 32767.0
+                    if r01 < 0.35:
+                        cm_len = 0.85 + r02 * 1.50
+                    elif r01 < 0.76:
+                        cm_len = 2.35 + r02 * 2.40
+                    else:
+                        cm_len = 4.85 + r02 * 2.07
+                    bh = min(max_cm_px, max(16.0, cm_len * px_cm) * (1.06 if wet else 1.0))
+                    w_rad = math.sin(phase_t * (2.05 if wet else 1.32) + seed_v * 0.43) * (0.088 if wet else 0.056)
+                    ang = ((seed_v % 9) - 4) * 0.032 + w_rad
+                    crl = w_rad * 0.55
+                    if has_cursor and vert_inf > 0.02 and cursor_local is not None:
+                        dx_c = bx - cursor_local.x()
+                        adx_c = abs(dx_c)
+                        if adx_c < 48.0:
+                            bell_e = 0.5 * (1.0 + math.cos(math.pi * adx_c / 48.0)) * vert_inf
+                            push_dir = (1.0 if dx_c >= 0.0 else -1.0) if adx_c > 3.5 else (1.0 if (seed_v % 2 == 0) else -1.0)
+                            hit_f = max(0.18, min(1.0, (root_y - cursor_local.y()) / max(20.0, bh)))
+                            ang += push_dir * bell_e * (1.05 + 0.44 * (1.0 - hit_f * 0.45))
+                            crl += push_dir * bell_e * (0.52 + 0.54 * hit_f)
+                    blade_states.append((bx, bh, max(-1.38, min(1.38, ang)), max(-1.26, min(1.26, crl))))
+                    w_scales.append(0.60 + r02 * 0.70)
+                    shade_indices.append(seed_v % 6)
+            can_calm = (
+                grass_sim is not None
+                and not grass_sim._settling
+                and not (has_cursor and vert_inf > 0.01)
+                and not has_music
+            )
             canopy_grads: list[QLinearGradient] = []
             top_y_g = turf_y - max_cm_px
             root_y_g = turf_y + 4.0
@@ -3700,8 +3709,8 @@ class AtmosphericScenePainter:
 
             m_cos = math.cos
             m_sin = math.sin
-            hw0_base = 2.60
-            hw2_base = 1.28
+            hw0_base = 3.05
+            hw2_base = 1.48
             has_w = bool(w_scales)
             has_sh = bool(shade_indices)
             for i, (bx, bh, ang, crl) in enumerate(blade_states):
@@ -4069,13 +4078,13 @@ class AtmosphericScenePainter:
         wind_force = max(0.0, min(1.0, abs(float(wind_ms)) / 20.0))
         wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
 
-        # -1. Distant misty 2D conifer forest spanning full liquid stretch width (-190..+190 beyond core)
+        # -1. Distant misty 2D conifer forest spanning full liquid stretch width (canonical size so expand morph never rebuilds!)
         dpr_f = max(1.0, float(p.device().devicePixelRatioF())) if p.device() is not None else 1.0
         horizon_y = turf_y + 4.0 * sc
         pad_forest_x = 190.0
-        f_w = max(64, int(math.ceil(core.width() + pad_forest_x * 2.0)))
-        f_h = max(160, int(math.ceil(290.0 * sc)))
-        forest_key = (f_w, f_h, round(dpr_f, 2), round(light_w * 4.0), round(snow_amt * 4.0), round(sc, 2))
+        f_w = 1040
+        f_h = 280
+        forest_key = (f_w, f_h, round(dpr_f, 2), round(light_w * 4.0), round(snow_amt * 4.0))
         cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
         if cache_dict is None:
             cache_dict = {}
@@ -4115,73 +4124,79 @@ class AtmosphericScenePainter:
                 f_grad = QLinearGradient(QPointF(0.0, float(f_h) * 0.15), QPointF(0.0, float(f_h)))
                 f_grad.setColorAt(0.0, c_top)
                 f_grad.setColorAt(1.0, c_bot)
-                trunk_batch = QPainterPath()
-                trunk_batch.setFillRule(Qt.FillRule.WindingFill)
-                batched = QPainterPath()
-                batched.setFillRule(Qt.FillRule.WindingFill)
-                ridge_batch = QPainterPath()
-                ridge_batch.setFillRule(Qt.FillRule.WindingFill)
-                snow_batched = QPainterPath()
-                snow_batched.setFillRule(Qt.FillRule.WindingFill)
-                step_f = 28.0 * sc * l_scale
-                n_trees_bg = int(f_w / max(9.0, step_f)) + 4
+                hi_c = QColor(min(255, c_top.red() + 14), min(255, c_top.green() + 22), min(255, c_top.blue() + 14), int(l_alpha * 0.52))
+                snow_c = QColor(232, 242, 255, int(round(115 * snow_amt)))
+                trunk_c = QColor(int(48 * (1.0 - light_w * 0.5)), int(30 * (1.0 - light_w * 0.5)), int(20 * (1.0 - light_w * 0.4)), l_alpha)
+
+                fp_p.setPen(Qt.PenStyle.NoPen)
+                tier_p = QPainterPath()
+                step_f = 28.0 * l_scale
+                n_trees_bg = int(f_w / max(9.0, step_f)) + 3
                 base_fy = float(f_h) - 2.0
                 for fi in range(n_trees_bg):
-                    fx = 8.0 + fi * step_f + ((fi * 19 + layer_idx * 11) % 9 - 4) * 1.9 * sc
-                    fh = (138.0 + ((fi * 37 + layer_idx * 23) % 92)) * sc * l_scale
-                    fw = (48.0 + ((fi * 17 + layer_idx * 7) % 24)) * sc * l_scale
+                    fx = 8.0 + fi * step_f + ((fi * 19 + layer_idx * 11) % 9 - 4) * 1.9
+                    fh = (138.0 + ((fi * 37 + layer_idx * 23) % 92)) * l_scale
+                    fw = (48.0 + ((fi * 17 + layer_idx * 7) % 24)) * l_scale
                     tw_f = max(3.5, fw * 0.13)
-                    trunk_batch.addRoundedRect(QRectF(fx - tw_f * 0.5, base_fy - fh * 0.32, tw_f, fh * 0.34), 2.0, 2.0)
-                    # Detailed 6-tier jagged spruce boughs with feathered branch tips
-                    n_tiers = 6
+                    fp_p.setBrush(trunk_c)
+                    fp_p.drawRoundedRect(QRectF(fx - tw_f * 0.5, base_fy - fh * 0.32, tw_f, fh * 0.34), 2.0, 2.0)
+
+                    # Draw each bough tier as a simple single-contour OddEven path (zero O(N^2) WindingFill tessellation!)
+                    n_tiers = 5
+                    fp_p.setBrush(f_grad)
                     for t_i in range(n_tiers):
                         u_t = t_i / float(n_tiers - 1)
                         t_top_y = base_fy - fh * (1.0 - u_t * 0.72)
                         t_bot_y = base_fy - fh * (0.74 - u_t * 0.64)
                         t_hw = fw * (0.22 + u_t * 0.56)
-                        batched.moveTo(fx, t_top_y)
-                        batched.quadTo(fx + t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx + t_hw, t_bot_y - 2.5 * sc)
-                        n_teeth = 5 + (t_i // 2)
+                        tier_p.clear()
+                        tier_p.moveTo(fx, t_top_y)
+                        tier_p.quadTo(fx + t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx + t_hw, t_bot_y - 2.5)
+                        n_teeth = 4 + (t_i // 2)
                         for j_t in range(n_teeth * 2 + 1):
                             fr_t = j_t / float(n_teeth * 2)
                             bx_t = (fx + t_hw) - fr_t * (t_hw * 2.0)
-                            tooth = (4.2 * sc * l_scale) if (j_t % 2 == 1) else (-1.8 * sc * l_scale)
-                            arch = math.sin(fr_t * math.pi) * (4.5 * sc * l_scale)
-                            batched.lineTo(bx_t, t_bot_y + tooth + arch)
-                        batched.quadTo(fx - t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx, t_top_y)
-                        batched.closeSubpath()
-                        if layer_idx >= 1 and t_i < 5:
-                            rh_w = t_hw * 0.64
-                            ridge_batch.moveTo(fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
-                            ridge_batch.quadTo(fx + rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx + rh_w, t_bot_y - 3.0 * sc)
-                            ridge_batch.quadTo(fx, t_bot_y + 1.5 * sc, fx - rh_w, t_bot_y - 3.0 * sc)
-                            ridge_batch.quadTo(fx - rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
-                            ridge_batch.closeSubpath()
+                            tooth = (4.0 * l_scale) if (j_t % 2 == 1) else (-1.6 * l_scale)
+                            arch = math.sin(fr_t * math.pi) * (4.2 * l_scale)
+                            tier_p.lineTo(bx_t, t_bot_y + tooth + arch)
+                        tier_p.quadTo(fx - t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx, t_top_y)
+                        tier_p.closeSubpath()
+                        fp_p.drawPath(tier_p)
+
+                    if layer_idx >= 1:
+                        fp_p.setBrush(hi_c)
+                        for t_i in range(4):
+                            u_t = t_i / 4.0
+                            t_top_y = base_fy - fh * (1.0 - u_t * 0.72)
+                            t_bot_y = base_fy - fh * (0.74 - u_t * 0.64)
+                            rh_w = fw * (0.22 + u_t * 0.56) * 0.62
+                            tier_p.clear()
+                            tier_p.moveTo(fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
+                            tier_p.quadTo(fx + rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx + rh_w, t_bot_y - 3.0)
+                            tier_p.quadTo(fx, t_bot_y + 1.5, fx - rh_w, t_bot_y - 3.0)
+                            tier_p.quadTo(fx - rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
+                            tier_p.closeSubpath()
+                            fp_p.drawPath(tier_p)
+
                     if snow_amt > 0.15 and layer_idx >= 1:
-                        snow_batched.moveTo(fx, base_fy - fh)
-                        snow_batched.quadTo(fx + fw * 0.18, base_fy - fh * 0.86, fx + fw * 0.24, base_fy - fh * 0.78)
-                        snow_batched.quadTo(fx, base_fy - fh * 0.75, fx - fw * 0.24, base_fy - fh * 0.78)
-                        snow_batched.quadTo(fx - fw * 0.18, base_fy - fh * 0.86, fx, base_fy - fh)
-                        snow_batched.closeSubpath()
-                fp_p.setPen(Qt.PenStyle.NoPen)
-                fp_p.setBrush(QColor(int(48 * (1.0 - light_w * 0.5)), int(30 * (1.0 - light_w * 0.5)), int(20 * (1.0 - light_w * 0.4)), l_alpha))
-                fp_p.drawPath(trunk_batch)
-                fp_p.setBrush(f_grad)
-                fp_p.drawPath(batched)
-                if not ridge_batch.isEmpty():
-                    hi_c = QColor(min(255, c_top.red() + 14), min(255, c_top.green() + 22), min(255, c_top.blue() + 14), int(l_alpha * 0.52))
-                    fp_p.setBrush(hi_c)
-                    fp_p.drawPath(ridge_batch)
-                if not snow_batched.isEmpty():
-                    fp_p.setBrush(QColor(232, 242, 255, int(round(115 * snow_amt))))
-                    fp_p.drawPath(snow_batched)
+                        fp_p.setBrush(snow_c)
+                        tier_p.clear()
+                        tier_p.moveTo(fx, base_fy - fh)
+                        tier_p.quadTo(fx + fw * 0.18, base_fy - fh * 0.86, fx + fw * 0.24, base_fy - fh * 0.78)
+                        tier_p.quadTo(fx, base_fy - fh * 0.75, fx - fw * 0.24, base_fy - fh * 0.78)
+                        tier_p.quadTo(fx - fw * 0.18, base_fy - fh * 0.86, fx, base_fy - fh)
+                        tier_p.closeSubpath()
+                        fp_p.drawPath(tier_p)
                 fp_p.end()
                 cached_layers.append((img_f, y_off))
             cache_dict[forest_key] = cached_layers
 
         for layer_idx, (img_f, y_off) in enumerate(cached_layers):
             sway_x = math.sin(phase_t * (1.2 + wind_force * 2.2) + layer_idx * 1.4) * (1.6 + 5.5 * wind_force) * sc
-            p.drawImage(QPointF(core.left() - pad_forest_x + sway_x, horizon_y + y_off * sc - float(f_h) + 6.0 * sc), img_f)
+            p.drawImage(
+                QRectF(core.center().x() - (f_w * 0.5) * sc + sway_x, horizon_y + y_off * sc - float(f_h) * sc + 6.0 * sc, float(f_w) * sc, float(f_h) * sc),
+                img_f,
+            )
 
         hx = core.center().x()
         hy = turf_y + 2.0 * sc
