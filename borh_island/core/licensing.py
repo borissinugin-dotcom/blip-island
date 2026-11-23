@@ -15,7 +15,7 @@ from pathlib import Path
 from borh_island.core.security import decrypt_secret, encrypt_secret
 
 APP_PRODUCT_NAME = "Blip"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 WORKER_BASE_URL = "https://blip-license-worker.blip-borh.workers.dev"
 ED25519_PUBLIC_KEY_B64U = "lue3Ld1hP5dYrUlXjrDRxmv6UWKl_vKAOjzmHKWJH8w"
 
@@ -733,13 +733,32 @@ class LicenseManager:
 
     def create_payment_order(self, worker_url: str = WORKER_BASE_URL) -> tuple[bool, dict]:
         try:
+            is_master = bool(self.get_status().is_master)
+            target_sum = 10 if is_master else 300
             status_code, data = _worker_request(
                 "POST",
                 f"{worker_url.rstrip('/')}/order/create",
-                json_body={"hwid": self.hwid, "tier": "pro", "plan": "3m", "duration_days": 90},
+                json_body={
+                    "hwid": self.hwid,
+                    "tier": "pro",
+                    "plan": "3m",
+                    "duration_days": 90,
+                    "is_master": is_master,
+                    "amount_rub": target_sum,
+                },
                 timeout=12.0,
             )
             if status_code == 200 and data.get("ok"):
+                data["amount_rub"] = target_sum
+                for url_key in ("pay_url", "qr_url", "sbp_url"):
+                    u = str(data.get(url_key) or "").strip()
+                    if "yoomoney.ru/quickpay/confirm.xml" in u:
+                        import re
+
+                        u = re.sub(r"([?&])sum=\d+(?:\.\d+)?", rf"\g<1>sum={target_sum}", u)
+                        if "paymentType=" not in u:
+                            u += "&paymentType=AC"
+                        data[url_key] = u
                 return True, data
             return False, {"error": data.get("error", f"HTTP {status_code}")}
         except Exception as exc:

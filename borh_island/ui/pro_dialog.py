@@ -105,7 +105,7 @@ class BlipProWidget(QWidget):
         root.addWidget(self.reason_lbl)
 
         self.perks_lbl = QLabel(
-            "Стоимость Blip PRO: 10 ₽ за 3 месяца.\n"
+            "Стоимость Blip PRO: 300 ₽ за 3 месяца.\n"
             "Подписка PRO открывает:\n"
             "• Стекло Liquid Glass и Frost Glass\n"
             "• Погоду фона в реальном времени\n"
@@ -117,7 +117,7 @@ class BlipProWidget(QWidget):
         root.addWidget(self.perks_lbl)
 
         pay_row = QHBoxLayout()
-        self.qr_btn = QPushButton("Перейти к оплате — 10 ₽ / 3 мес")
+        self.qr_btn = QPushButton("Перейти к оплате — 300 ₽ / 3 мес")
         self.qr_btn.clicked.connect(self._start_web_payment)
         pay_row.addWidget(self.qr_btn)
 
@@ -171,6 +171,17 @@ class BlipProWidget(QWidget):
             tier_txt = "Blip FREE"
         self.title_lbl.setText(tier_txt)
 
+        is_master = bool(getattr(st, "is_master", False))
+        price_rub = 10 if is_master else 300
+        self.perks_lbl.setText(
+            f"Стоимость Blip PRO: {price_rub} ₽ за 3 месяца"
+            f"{' (тариф Master BORh)' if is_master else ''}.\n"
+            "Подписка PRO открывает:\n"
+            "• Стекло Liquid Glass и Frost Glass\n"
+            "• Погоду фона в реальном времени\n"
+            "• Статы в играх, Таймер и щит курсора\n"
+            "• Всех персонажей (кроме 4 эксклюзивов разработчиков)"
+        )
         is_paid_pro = st.is_permanent_pro and getattr(st, "source", "") != "dev_code"
         if getattr(st, "payment_blocked", False):
             self.qr_btn.setEnabled(False)
@@ -186,16 +197,16 @@ class BlipProWidget(QWidget):
             self.qr_lbl.setVisible(False)
         else:
             self.qr_btn.setEnabled(True)
-            self.qr_btn.setText("Перейти к оплате — 10 ₽ / 3 мес")
+            self.qr_btn.setText(f"Перейти к оплате — {price_rub} ₽ / 3 мес")
 
-        self.master_btn.setVisible(bool(getattr(st, "is_master", False)))
+        self.master_btn.setVisible(is_master)
 
         if getattr(st, "revoked_reason", "") and not reason:
             reason = st.revoked_reason
         elif st.tier == "TRIAL" and not reason:
             reason = (
                 f"У вас Trial-версия на 3 часа (осталось {format_trial_remaining(st.trial_days_left)}). "
-                "Оплатите 10 ₽ за 3 месяца, если хотите активировать Blip PRO сразу."
+                f"Оплатите {price_rub} ₽ за 3 месяца, если хотите активировать Blip PRO сразу."
             )
         if reason:
             self.reason_lbl.setText(reason)

@@ -123,18 +123,25 @@ def download_and_stage_update(info: UpdateInfo, project_dir: Path | None = None)
                     return True, f"Новый .exe скачан в {new_exe}"
                 pid = os.getpid()
                 cur_exe = Path(sys.executable).resolve()
-                bat_path = stage_root / "apply_exe_update.bat"
-                bat_content = (
-                    "@echo off\r\n"
-                    "timeout /t 2 /nobreak >nul\r\n"
-                    f":waitloop\r\ntasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul && (timeout /t 1 /nobreak >nul & goto waitloop)\r\n"
-                    f"move /Y \"{new_exe}\" \"{cur_exe}\" >nul\r\n"
-                    f"start \"\" \"{cur_exe}\" --replace\r\n"
+                py_restarter = stage_root / "apply_exe_update.py"
+                py_restarter.write_text(
+                    "import os, shutil, subprocess, time\n"
+                    f"new_exe = {str(new_exe)!r}\n"
+                    f"cur_exe = {str(cur_exe)!r}\n"
+                    "time.sleep(1.4)\n"
+                    "for _ in range(15):\n"
+                    "    try:\n"
+                    "        shutil.copy2(new_exe, cur_exe)\n"
+                    "        break\n"
+                    "    except Exception:\n"
+                    "        time.sleep(0.5)\n"
+                    "subprocess.Popen([cur_exe, '--replace'], cwd=os.path.dirname(cur_exe), close_fds=True)\n",
+                    encoding="utf-8",
                 )
-                bat_path.write_text(bat_content, encoding="utf-8")
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
                 subprocess.Popen(
-                    ["cmd.exe", "/c", str(bat_path)],
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    [sys.executable, str(py_restarter)],
+                    creationflags=flags,
                     close_fds=True,
                 )
                 return True, f"Обновление до v{info.latest_version} загружено. Перезапуск..."
@@ -155,21 +162,28 @@ def download_and_stage_update(info: UpdateInfo, project_dir: Path | None = None)
             subdirs = [p for p in extract_dir.iterdir() if p.is_dir()]
             src_root = subdirs[0] if len(subdirs) == 1 else extract_dir
             target_dir = project_dir or Path(__file__).resolve().parent.parent.parent
-            pid = os.getpid()
-            bat_path = stage_root / "apply_src_update.bat"
             launch_exe = sys.executable
             main_py = target_dir / "main.py"
-            bat_content = (
-                "@echo off\r\n"
-                "timeout /t 2 /nobreak >nul\r\n"
-                f":waitloop\r\ntasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul && (timeout /t 1 /nobreak >nul & goto waitloop)\r\n"
-                f"xcopy /E /Y /I \"{src_root}\\*\" \"{target_dir}\\\" >nul\r\n"
-                f"start \"\" \"{launch_exe}\" \"{main_py}\" --replace\r\n"
+            py_restarter = stage_root / "apply_src_update.py"
+            py_restarter.write_text(
+                "import shutil, subprocess, time\n"
+                f"src_root = {str(src_root)!r}\n"
+                f"target_dir = {str(target_dir)!r}\n"
+                f"launch_exe = {str(launch_exe)!r}\n"
+                f"main_py = {str(main_py)!r}\n"
+                "time.sleep(1.2)\n"
+                "try:\n"
+                "    shutil.copytree(src_root, target_dir, dirs_exist_ok=True)\n"
+                "except Exception:\n"
+                "    pass\n"
+                "flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess, 'DETACHED_PROCESS', 0)\n"
+                "subprocess.Popen([launch_exe, main_py, '--replace'], cwd=target_dir, creationflags=flags, close_fds=True)\n",
+                encoding="utf-8",
             )
-            bat_path.write_text(bat_content, encoding="utf-8")
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
             subprocess.Popen(
-                ["cmd.exe", "/c", str(bat_path)],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                [launch_exe, str(py_restarter)],
+                creationflags=flags,
                 close_fds=True,
             )
             return True, f"Исходники обновлены до v{info.latest_version}. Перезапуск..."

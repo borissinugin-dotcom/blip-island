@@ -441,8 +441,6 @@ class CharacterWidget(QWidget):
             fn(p, cx, cy, r)
         p.restore()
 
-        if self._alarm:
-            self._draw_alarm_halo(p, cx, cy, r * 1.24)
         if self._thinking:
             self._draw_thinking_ring(p, cx, cy, r * 1.26)
         if self._precip in ("rain", "snow", "storm"):

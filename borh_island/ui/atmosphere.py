@@ -3491,12 +3491,12 @@ class AtmosphericScenePainter:
                 p.setPen(QPen(QColor(214, 236, 255, ra), 1.0))
                 p.drawEllipse(QPointF(rx, ry), rad, rad * 0.25)
 
-        # Inverted vertical gradient: gentle touch near the top, very strong parting toward the bottom
+        # Inverted vertical gradient: gentle touch near the top, very strong parting toward the bottom (strictly inside island!)
         top_y = turf_y - 52.0
         has_cursor = (
             cursor_local is not None
             and eff_left <= cursor_local.x() <= (eff_left + eff_width)
-            and top_y <= cursor_local.y() <= soil_bottom
+            and top_y <= cursor_local.y() <= (turf_y + 10.0)
         )
         vert_inf = 0.0
         if has_cursor and cursor_local is not None:
@@ -4066,9 +4066,10 @@ class AtmosphericScenePainter:
         wind_force = max(0.0, min(1.0, abs(float(wind_ms)) / 20.0))
         wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
 
-        # -1. Distant misty conifer forest along the elevated 3D meadow horizon (soft rounded pine boughs, no sharp spikes!)
-        horizon_y = turf_y - 84.0 * sc
-        f_w = max(64, int(math.ceil(core.width() + 40.0)))
+        # -1. Distant misty 2D conifer forest spanning full liquid stretch width (-180..+180 beyond core)
+        horizon_y = turf_y + 4.0 * sc
+        pad_forest_x = 180.0
+        f_w = max(64, int(math.ceil(core.width() + pad_forest_x * 2.0)))
         f_h = max(160, int(math.ceil(280.0 * sc)))
         forest_key = (f_w, f_h, round(light_w * 10.0), round(snow_amt * 8.0), round(sc, 2))
         cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
@@ -4080,43 +4081,45 @@ class AtmosphericScenePainter:
             if len(cache_dict) > 6:
                 cache_dict.clear()
             cached_layers = []
-            for layer_idx, (l_scale, l_alpha, y_off) in enumerate(((0.72, 115, 0.0), (0.95, 165, 8.0))):
+            for layer_idx, (l_scale, l_alpha, y_off) in enumerate(((0.74, 125, 0.0), (0.96, 180, 6.0))):
                 img_f = QImage(f_w, f_h, QImage.Format.Format_ARGB32_Premultiplied)
                 img_f.fill(0)
                 fp_p = QPainter(img_f)
                 fp_p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 if layer_idx == 0:
                     f_col = QColor(
-                        int(round(24 * (1.0 - light_w * 0.65) + 38 * snow_amt)),
-                        int(round(62 * (1.0 - light_w * 0.62) + 38 * snow_amt)),
-                        int(round(48 * (1.0 - light_w * 0.48) + 46 * snow_amt)),
+                        int(round(22 * (1.0 - light_w * 0.65) + 36 * snow_amt)),
+                        int(round(64 * (1.0 - light_w * 0.62) + 38 * snow_amt)),
+                        int(round(46 * (1.0 - light_w * 0.48) + 46 * snow_amt)),
                         l_alpha,
                     )
                 else:
                     f_col = QColor(
-                        int(round(16 * (1.0 - light_w * 0.62) + 26 * snow_amt)),
-                        int(round(50 * (1.0 - light_w * 0.60) + 26 * snow_amt)),
-                        int(round(34 * (1.0 - light_w * 0.45) + 32 * snow_amt)),
+                        int(round(15 * (1.0 - light_w * 0.62) + 26 * snow_amt)),
+                        int(round(52 * (1.0 - light_w * 0.60) + 28 * snow_amt)),
+                        int(round(34 * (1.0 - light_w * 0.45) + 34 * snow_amt)),
                         l_alpha,
                     )
                 batched = QPainterPath()
+                batched.setFillRule(Qt.FillRule.WindingFill)
                 snow_batched = QPainterPath()
-                step_f = 34.0 * sc * l_scale
-                n_trees_bg = int(f_w / max(10.0, step_f)) + 2
+                snow_batched.setFillRule(Qt.FillRule.WindingFill)
+                step_f = 30.0 * sc * l_scale
+                n_trees_bg = int(f_w / max(10.0, step_f)) + 3
                 base_fy = float(f_h) - 2.0
                 for fi in range(n_trees_bg):
-                    fx = 20.0 + fi * step_f + ((fi * 17) % 7) * 2.5 * sc
-                    fh = (140.0 + ((fi * 31 + layer_idx * 19) % 85)) * sc * l_scale
-                    fw = (46.0 + ((fi * 13) % 20)) * sc * l_scale
-                    # Soft curved-bough pine silhouette (rounded shoulders & gentle droop instead of sharp spikes)
-                    for t_i in range(4):
-                        t_top_y = base_fy - fh * (1.0 - t_i * 0.20)
-                        t_bot_y = base_fy - fh * (0.66 - t_i * 0.21)
-                        t_hw = fw * (0.32 + t_i * 0.18)
+                    fx = 12.0 + fi * step_f + ((fi * 17) % 7) * 2.2 * sc
+                    fh = (145.0 + ((fi * 31 + layer_idx * 19) % 88)) * sc * l_scale
+                    fw = (52.0 + ((fi * 13) % 22)) * sc * l_scale
+                    # Lush 5-tier filled 2D spruce silhouette (WindingFill eliminates hollow overlap triangles)
+                    for t_i in range(5):
+                        t_top_y = base_fy - fh * (1.0 - t_i * 0.17)
+                        t_bot_y = base_fy - fh * (0.64 - t_i * 0.16)
+                        t_hw = fw * (0.28 + t_i * 0.16)
                         batched.moveTo(fx, t_top_y)
-                        batched.quadTo(fx + t_hw * 0.65, (t_top_y + t_bot_y) * 0.52, fx + t_hw, t_bot_y)
-                        batched.quadTo(fx, t_bot_y + 5.0 * sc, fx - t_hw, t_bot_y)
-                        batched.quadTo(fx - t_hw * 0.65, (t_top_y + t_bot_y) * 0.52, fx, t_top_y)
+                        batched.quadTo(fx + t_hw * 0.58, t_top_y + (t_bot_y - t_top_y) * 0.55, fx + t_hw, t_bot_y)
+                        batched.quadTo(fx, t_bot_y + 7.0 * sc, fx - t_hw, t_bot_y)
+                        batched.quadTo(fx - t_hw * 0.58, t_top_y + (t_bot_y - t_top_y) * 0.55, fx, t_top_y)
                         batched.closeSubpath()
                     if snow_amt > 0.15 and layer_idx == 1:
                         snow_batched.moveTo(fx, base_fy - fh)
@@ -4136,35 +4139,10 @@ class AtmosphericScenePainter:
 
         for layer_idx, (img_f, y_off) in enumerate(cached_layers):
             sway_x = math.sin(phase_t * (1.2 + wind_force * 2.2) + layer_idx * 1.4) * (1.6 + 5.5 * wind_force) * sc
-            p.drawImage(QPointF(core.left() - 20.0 + sway_x, horizon_y + y_off * sc - float(f_h) + 6.0 * sc), img_f)
+            p.drawImage(QPointF(core.left() - pad_forest_x + sway_x, horizon_y + y_off * sc - float(f_h) + 6.0 * sc), img_f)
 
-        # -0.5. Tilted 3D Perspective Meadow Clearing Plane (sloping from horizon_y down to foreground turf_y)
-        p.save()
-        meadow_r = QRectF(core.left() - 20.0, horizon_y, core.width() + 40.0, (turf_y + 18.0 * sc) - horizon_y)
-        m_grad = QLinearGradient(QPointF(core.center().x(), horizon_y), QPointF(core.center().x(), turf_y + 16.0 * sc))
-        if snow_amt > 0.35:
-            m_grad.setColorAt(0.0, QColor(int(188 * (1.0 - light_w * 0.42)), int(206 * (1.0 - light_w * 0.38)), int(228 * (1.0 - light_w * 0.28)), 235))
-            m_grad.setColorAt(1.0, QColor(int(230 * (1.0 - light_w * 0.38)), int(240 * (1.0 - light_w * 0.34)), int(252 * (1.0 - light_w * 0.24)), 245))
-        else:
-            m_grad.setColorAt(0.0, QColor(int(26 * (1.0 - light_w * 0.55)), int(74 * (1.0 - light_w * 0.55)), int(38 * (1.0 - light_w * 0.45)), 235))
-            m_grad.setColorAt(0.55, QColor(int(36 * (1.0 - light_w * 0.55)), int(94 * (1.0 - light_w * 0.55)), int(44 * (1.0 - light_w * 0.45)), 242))
-            m_grad.setColorAt(1.0, QColor(int(44 * (1.0 - light_w * 0.55)), int(112 * (1.0 - light_w * 0.55)), int(50 * (1.0 - light_w * 0.45)), 248))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(m_grad)
-        p.drawRect(meadow_r)
-
-        # Winding 3D perspective path from cabin front door to foreground
         hx = core.center().x()
-        hy = turf_y - 26.0 * sc
-        path_p = QPainterPath()
-        path_p.moveTo(hx - 24.0 * sc, hy - 2.0 * sc)
-        path_p.quadTo(hx - 14.0 * sc, hy + 18.0 * sc, hx + 8.0 * sc, turf_y + 12.0 * sc)
-        path_p.lineTo(hx + 44.0 * sc, turf_y + 12.0 * sc)
-        path_p.quadTo(hx + 10.0 * sc, hy + 16.0 * sc, hx - 4.0 * sc, hy - 2.0 * sc)
-        path_p.closeSubpath()
-        p.setBrush(QColor(214, 226, 240, 150) if snow_amt > 0.35 else QColor(124, 96, 68, 165))
-        p.drawPath(path_p)
-        p.restore()
+        hy = turf_y + 2.0 * sc
 
         def _draw_snowball(cx: float, cy: float, r: float, rot: float = 0.0) -> None:
             p.save()
@@ -4189,13 +4167,11 @@ class AtmosphericScenePainter:
                 p.drawEllipse(QPointF(px, py), pr * 1.15, pr * 0.85)
             p.restore()
 
-        # 0. 3/4 Angled 3D Old Wooden Log Cabin in the Center of the Clearing
+        # 0. Flat 2D Front-Facing Old Wooden Log Cabin on the Horizon
         cab_w = 176.0 * sc
-        cab_h = 136.0 * sc
-        roof_h = 74.0 * sc
-        side_dx = 46.0 * sc
-        side_dy = -18.0 * sc
-        cab_l = hx - cab_w * 0.58
+        cab_h = 132.0 * sc
+        roof_h = 72.0 * sc
+        cab_l = hx - cab_w * 0.50
         cab_t = hy - cab_h
 
         p.save()
@@ -4270,26 +4246,7 @@ class AtmosphericScenePainter:
             p.drawEllipse(QRectF(cab_l - 11.0 * sc, ly + 1.0, log_h * 0.72, log_h - 2.0))
             p.drawEllipse(QRectF(cab_l + cab_w + 11.0 * sc - log_h * 0.72, ly + 1.0, log_h * 0.72, log_h - 2.0))
 
-        # 3D Angled Side Log Wall (perspective depth!)
-        side_wall = QPainterPath()
-        side_wall.moveTo(cab_l + cab_w, cab_t)
-        side_wall.lineTo(cab_l + cab_w + side_dx, cab_t + side_dy)
-        side_wall.lineTo(cab_l + cab_w + side_dx, hy + side_dy)
-        side_wall.lineTo(cab_l + cab_w, hy)
-        side_wall.closeSubpath()
-        sw_grad = QLinearGradient(QPointF(cab_l + cab_w, cab_t), QPointF(cab_l + cab_w + side_dx, hy))
-        sw_grad.setColorAt(0.0, QColor(int(98 * wet_dim), int(58 * wet_dim), int(32 * wet_dim)))
-        sw_grad.setColorAt(1.0, QColor(int(58 * wet_dim), int(34 * wet_dim), int(18 * wet_dim)))
-        p.setPen(QPen(QColor(38, 22, 12, 220), 1.2))
-        p.setBrush(sw_grad)
-        p.drawPath(side_wall)
-        # Side log courses + side window
-        p.setPen(QPen(QColor(42, 24, 14, 175), 1.0))
-        for li in range(1, n_logs):
-            ly_f = cab_t + li * log_h
-            p.drawLine(QPointF(cab_l + cab_w, ly_f), QPointF(cab_l + cab_w + side_dx, ly_f + side_dy))
-
-        # Gable triangle upper wall (rich warm brown)
+        # Gable triangle upper wall (rich warm brown, flat 2D)
         gable = QPainterPath()
         gable.moveTo(cab_l + 4.0 * sc, cab_t + 2.0)
         gable.lineTo(hx, cab_t - roof_h + 6.0 * sc)
@@ -4302,7 +4259,7 @@ class AtmosphericScenePainter:
         # Heavy wooden door on left-center + cozy porch lantern
         door_w = 38.0 * sc
         door_h = 74.0 * sc
-        door_x = hx - cab_w * 0.28 - door_w * 0.5
+        door_x = hx - cab_w * 0.22 - door_w * 0.5
         door_y = hy - door_h - 4.0 * sc
         p.setPen(QPen(QColor(38, 24, 15), max(1.5, 2.0 * sc)))
         p.setBrush(QColor(68, 42, 26))
@@ -4318,7 +4275,7 @@ class AtmosphericScenePainter:
         # Windows (main window right of door + attic round/arch window) — glow warmly at night, glassy by day!
         win_w = 46.0 * sc
         win_h = 42.0 * sc
-        win_x = hx + cab_w * 0.16 - win_w * 0.5
+        win_x = hx + cab_w * 0.18 - win_w * 0.5
         win_y = cab_t + 44.0 * sc
         attic_r = 14.0 * sc
         attic_y = cab_t - roof_h * 0.36
@@ -4361,19 +4318,8 @@ class AtmosphericScenePainter:
         p.drawLine(QPointF(hx - attic_r, attic_y), QPointF(hx + attic_r, attic_y))
         p.drawLine(QPointF(hx, attic_y - attic_r), QPointF(hx, attic_y + attic_r))
 
-        # 3D Side Roof Slope receding in perspective
+        # Flat 2D Pitched wooden shingle roof with overhanging eaves
         overhang = 22.0 * sc
-        side_roof = QPainterPath()
-        side_roof.moveTo(hx, cab_t - roof_h - 4.0 * sc)
-        side_roof.lineTo(hx + side_dx, cab_t - roof_h - 4.0 * sc + side_dy)
-        side_roof.lineTo(cab_l + cab_w + overhang + side_dx, cab_t + 8.0 * sc + side_dy)
-        side_roof.lineTo(cab_l + cab_w + overhang, cab_t + 8.0 * sc)
-        side_roof.closeSubpath()
-        p.setPen(QPen(QColor(24, 14, 10), 1.2))
-        p.setBrush(QColor(int(52 * wet_dim), int(32 * wet_dim), int(22 * wet_dim)))
-        p.drawPath(side_roof)
-
-        # Pitched wooden shingle roof with overhanging eaves
         roof_p = QPainterPath()
         roof_p.moveTo(hx, cab_t - roof_h - 4.0 * sc)
         roof_p.lineTo(cab_l + cab_w + overhang, cab_t + 8.0 * sc)

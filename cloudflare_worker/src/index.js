@@ -95,7 +95,8 @@ export async function handleRequest(request, env) {
       return json({ ok: false, error: "wallet_not_configured" }, 500);
     }
 
-    const amountRub = Number(env.MIN_AMOUNT_RUB || 10);
+    const isMaster = Boolean(body?.is_master);
+    const amountRub = isMaster ? 10 : Number(env.MIN_AMOUNT_RUB || 300);
     const payType = String(body?.payment_type || "AC").toUpperCase() === "PC" ? "PC" : "AC";
     const orderId = randomOrderId();
     const record = {

@@ -3618,6 +3618,11 @@ class IslandWindow(QWidget):
             for btn in page.findChildren((QPushButton, QToolButton)):
                 if btn.width() < 18 or btn.height() < 18 or not _is_visible_in_page(btn, page):
                     continue
+                if isinstance(btn, QToolButton):
+                    continue
+                qss_low = (btn.styleSheet() or "").lower()
+                if "background: transparent" in qss_low or "background:transparent" in qss_low:
+                    continue
                 tl = btn.mapTo(page, QPoint(0, 0))
                 br_r = QRectF(
                     page_origin.x() + float(tl.x()) + page_dx,
@@ -3628,10 +3633,15 @@ class IslandWindow(QWidget):
                 ok, clip_r, sb_id = _page_scroll_clip(btn, br_r, keep_clipped=(out_tpl is None))
                 if not ok:
                     continue
-                if abs(br_r.width() - br_r.height()) <= 6.0 and br_r.width() >= 36.0:
-                    rad = min(br_r.width(), br_r.height()) * 0.5
+                if abs(br_r.width() - br_r.height()) <= 14.0:
+                    side = min(br_r.width(), br_r.height())
+                    cx_b, cy_b = br_r.center().x(), br_r.center().y()
+                    br_r = QRectF(cx_b - side * 0.5, cy_b - side * 0.5, side, side)
+                    rad = side * 0.5
+                elif br_r.height() >= 34.0 or "border-radius: 18px" in qss_low or "border-radius: 19px" in qss_low or "border-radius: 20px" in qss_low or "border-radius: 24px" in qss_low:
+                    rad = br_r.height() * 0.5
                 else:
-                    rad = 10.0 if br_r.height() <= 30.0 else min(14.0, br_r.height() * 0.45)
+                    rad = 11.0 if br_r.height() <= 30.0 else br_r.height() * 0.46
                 if out_tpl is not None:
                     out_tpl[1].append((br_r, rad, clip_r, opacity, sb_id))
                 if core.intersects(br_r) and (clip_r is None or br_r.intersects(clip_r)):
@@ -3667,27 +3677,13 @@ class IslandWindow(QWidget):
                 tab_v_scroll = 0
                 for sb in sbars:
                     tab_v_scroll = (tab_v_scroll * 31) ^ sb.value()
-                base_key = (id(active_tab), self.width(), self.height(), round(core.x(), 1), round(core.y(), 1))
+                sub_mode = int(getattr(active_tab, "_mode_idx", -1))
+                base_key = (id(active_tab), sub_mode, self.width(), self.height(), round(core.x(), 1), round(core.y(), 1))
                 gc_key = (base_key, tab_v_scroll)
                 cached_gc = getattr(self, "_glass_geo_cache", None)
-                tpl_cache = getattr(self, "_glass_tpl_cache", None)
-                if cached_gc is not None and cached_gc[0] == gc_key and (now_gc - cached_gc[1]) < 5.0:
+                if cached_gc is not None and cached_gc[0] == gc_key and (now_gc - cached_gc[1]) < 0.035:
                     card_targets = list(cached_gc[2])
                     btn_targets = list(cached_gc[3])
-                elif tpl_cache is not None and tpl_cache[0] == base_key and (now_gc - tpl_cache[1]) < 0.75:
-                    _, _, cap_vals, tpl_cards, tpl_btns = tpl_cache
-                    deltas = {k: float(cur_vals.get(k, 0) - cap_vals.get(k, 0)) for k in cap_vals}
-                    for r, rad, clip_r, op, sb_id in tpl_cards:
-                        dy = deltas.get(sb_id, 0.0) if sb_id is not None else 0.0
-                        rr = r.translated(0.0, -dy) if dy != 0.0 else r
-                        if core.intersects(rr) and (clip_r is None or rr.intersects(clip_r)):
-                            card_targets.append((rr, rad, clip_r, op))
-                    for r, rad, clip_r, op, sb_id in tpl_btns:
-                        dy = deltas.get(sb_id, 0.0) if sb_id is not None else 0.0
-                        rr = r.translated(0.0, -dy) if dy != 0.0 else r
-                        if core.intersects(rr) and (clip_r is None or rr.intersects(clip_r)):
-                            btn_targets.append((rr, rad, clip_r, op))
-                    self._glass_geo_cache = (gc_key, now_gc, list(card_targets), list(btn_targets))
                 else:
                     tab_tl = active_tab.mapTo(self, QPoint(0, 0))
                     out_tpl: tuple[list, list] = ([], [])
@@ -4175,6 +4171,7 @@ class IslandWindow(QWidget):
                     glass_mode,
                     str(getattr(cfg, "refraction_quality", "ultra") or "ultra").lower(),
                     id(active_tab) if active_tab is not None else 0,
+                    int(getattr(active_tab, "_mode_idx", -1)) if active_tab is not None else -1,
                     tab_scroll_sig,
                 )
                 comp_cache = getattr(self, "_exp_composite_cache", None)
@@ -4186,7 +4183,7 @@ class IslandWindow(QWidget):
                 elif live_scene_motion or use_weather_atmo:
                     max_age = max(min_paint_dt, 0.016)
                 else:
-                    max_age = 0.50
+                    max_age = 0.035
                 if scroll_running:
                     surf_age = 0.075
                 elif live_scene_motion or use_weather_atmo:

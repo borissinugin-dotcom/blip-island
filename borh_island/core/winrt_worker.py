@@ -66,14 +66,20 @@ function Read-ThumbnailB64($thumbRef, $artKey) {
     }
     try {
         $stream = Await-WinRT ($thumbRef.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
+        if ($null -eq $stream) { return "" }
         $size = [uint32]$stream.Size
-        if ($size -le 0 -or $size -gt 6291456) { return "" }
-        $reader = New-Object Windows.Storage.Streams.DataReader($stream)
-        $null = Await-WinRT ($reader.LoadAsync($size)) ([uint32])
-        $bytes = New-Object byte[] $size
-        $reader.ReadBytes($bytes)
-        $reader.Dispose()
+        if ($size -le 0 -or $size -gt 6291456) {
+            $stream.Dispose()
+            return ""
+        }
+        $netStream = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($stream)
+        $ms = New-Object System.IO.MemoryStream
+        $netStream.CopyTo($ms)
+        $bytes = $ms.ToArray()
+        $ms.Dispose()
+        $netStream.Dispose()
         $stream.Dispose()
+        if ($bytes.Length -le 0) { return "" }
         $b64 = [Convert]::ToBase64String($bytes)
         $script:lastArtKey = $artKey
         $script:lastArtB64 = $b64
@@ -84,6 +90,10 @@ function Read-ThumbnailB64($thumbRef, $artKey) {
 }
 
 function Get-MediaState($preferredAppId, $skipThumb) {
+    $freshMgr = Await-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+    if ($null -ne $freshMgr) {
+        $script:gsmtcMgr = $freshMgr
+    }
     if ($null -eq $script:gsmtcMgr) {
         return @{ ok = $false; sessions = @(); active = $null }
     }

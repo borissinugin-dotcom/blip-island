@@ -96,7 +96,8 @@ class LyricsService:
 
     @staticmethod
     def make_key(artist: str, title: str, album: str = "", duration: float = 0.0) -> str:
-        return f"{artist.strip().lower()}|{title.strip().lower()}|{album.strip().lower()}|{int(round(duration))}"
+        del album, duration
+        return f"{artist.strip().lower()}|{title.strip().lower()}"
 
     def fetch(self, title: str, artist: str = "", album: str = "", duration: float = 0.0) -> LyricsResult | None:
         """Fetch lyrics synchronously (run from worker thread)."""
@@ -117,37 +118,39 @@ class LyricsService:
             params["duration"] = int(round(duration))
 
         data: dict | None = None
-        try:
-            with httpx.Client(timeout=8.0, headers=headers) as client:
-                if artist.strip():
-                    resp = client.get("https://lrclib.net/api/get", params=params)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                if not data:
-                    q = f"{artist.strip()} {clean_title}".strip()
-                    resp = client.get("https://lrclib.net/api/search", params={"q": q})
-                    if resp.status_code == 200:
-                        items = resp.json()
-                        if isinstance(items, list) and items:
-                            # Prefer entry with syncedLyrics
-                            data = next((it for it in items if it.get("syncedLyrics")), items[0])
-                if not data:
-                    t_cl, a_cl = _clean_search_meta(clean_title, artist)
-                    q_cl = f"{a_cl} {t_cl}".strip()
-                    if q_cl and q_cl.lower() != f"{artist.strip()} {clean_title}".strip().lower():
-                        resp = client.get("https://lrclib.net/api/search", params={"q": q_cl})
+        for trust_env in (False, True):
+            if data:
+                break
+            try:
+                with httpx.Client(timeout=4.5, headers=headers, trust_env=trust_env) as client:
+                    if artist.strip():
+                        resp = client.get("https://lrclib.net/api/get", params=params)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                    if not data:
+                        q = f"{artist.strip()} {clean_title}".strip()
+                        resp = client.get("https://lrclib.net/api/search", params={"q": q})
                         if resp.status_code == 200:
                             items = resp.json()
                             if isinstance(items, list) and items:
                                 data = next((it for it in items if it.get("syncedLyrics")), items[0])
-                    if not data and t_cl and t_cl.lower() != q_cl.lower():
-                        resp = client.get("https://lrclib.net/api/search", params={"q": t_cl})
-                        if resp.status_code == 200:
-                            items = resp.json()
-                            if isinstance(items, list) and items:
-                                data = next((it for it in items if it.get("syncedLyrics")), items[0])
-        except Exception:
-            return None
+                    if not data:
+                        t_cl, a_cl = _clean_search_meta(clean_title, artist)
+                        q_cl = f"{a_cl} {t_cl}".strip()
+                        if q_cl and q_cl.lower() != f"{artist.strip()} {clean_title}".strip().lower():
+                            resp = client.get("https://lrclib.net/api/search", params={"q": q_cl})
+                            if resp.status_code == 200:
+                                items = resp.json()
+                                if isinstance(items, list) and items:
+                                    data = next((it for it in items if it.get("syncedLyrics")), items[0])
+                        if not data and t_cl and t_cl.lower() != q_cl.lower():
+                            resp = client.get("https://lrclib.net/api/search", params={"q": t_cl})
+                            if resp.status_code == 200:
+                                items = resp.json()
+                                if isinstance(items, list) and items:
+                                    data = next((it for it in items if it.get("syncedLyrics")), items[0])
+            except Exception:
+                continue
 
         if not data:
             return None

@@ -520,6 +520,65 @@ class NotesTab(QWidget):
         self._timer_remaining = 300
         self.timer_updated.emit(0, False, self._timer_label)
 
+    @staticmethod
+    def _play_custom_timer_chime() -> None:
+        """Synthesize and play a custom warm polyphonic crystal-bell alarm chime in background."""
+        import io
+        import struct
+        import sys
+        import threading
+        import wave
+
+        def _worker() -> None:
+            try:
+                sr = 22050
+                # Dual crystal bell arpeggio: C5 (523Hz), E5 (659Hz), G5 (784Hz), C6 (1046Hz) x 2
+                notes = [
+                    (0.00, 523.25, 0.36),
+                    (0.14, 659.25, 0.36),
+                    (0.28, 783.99, 0.38),
+                    (0.42, 1046.50, 0.65),
+                    (1.05, 523.25, 0.36),
+                    (1.19, 659.25, 0.36),
+                    (1.33, 783.99, 0.38),
+                    (1.47, 1046.50, 0.80),
+                ]
+                dur = 2.35
+                n_samples = int(sr * dur)
+                buf = bytearray(n_samples * 2)
+                tau = math.pi * 2.0
+                for i in range(n_samples):
+                    t = i / float(sr)
+                    val = 0.0
+                    for t0, freq, ndur in notes:
+                        dt = t - t0
+                        if 0.0 <= dt < ndur:
+                            attack = min(1.0, dt / 0.008)
+                            env = attack * math.exp(-dt * 4.8)
+                            val += env * (
+                                0.68 * math.sin(tau * freq * dt)
+                                + 0.22 * math.sin(tau * (freq * 2.0) * dt)
+                                + 0.10 * math.sin(tau * (freq * 3.0) * dt)
+                            )
+                    s_int = max(-32767, min(32767, int(val * 14500.0)))
+                    struct.pack_into("<h", buf, i * 2, s_int)
+
+                bio = io.BytesIO()
+                with wave.open(bio, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sr)
+                    wf.writeframes(bytes(buf))
+                wav_bytes = bio.getvalue()
+                if sys.platform == "win32":
+                    import winsound
+
+                    winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _on_countdown_tick(self) -> None:
         if not self._timer_running:
             return
@@ -530,6 +589,7 @@ class NotesTab(QWidget):
             self._timer_running = False
             self._countdown_tick.stop()
             self.timer_start_btn.set_icon_name("play")
+            self._play_custom_timer_chime()
             self.timer_finished.emit(self._timer_label)
 
     def _update_timer_display(self) -> None:

@@ -431,9 +431,10 @@ class MediaService(QObject):
             self._cached_fb_sp = None
         self._spotify_hwnd = sp[0] if sp is not None else 0
 
-        # Fallback / supplement for Yandex Music desktop app window titles if GSMTC has no playing track
-        act_playing = bool(act_raw and act_raw.get("status") == "Playing" and (act_raw.get("title") or act_raw.get("artist")))
-        if (not act_playing) and (
+        # Fallback / supplement for Yandex Music desktop app window titles ONLY if GSMTC has no active track at all
+        has_gsmtc_track = bool(act_raw and (act_raw.get("title") or act_raw.get("artist")))
+        act_playing = bool(has_gsmtc_track and act_raw.get("status") == "Playing")
+        if (not has_gsmtc_track) and (
             not self.preferred_app_id or "yandex" in self.preferred_app_id.lower()
         ):
             if has_ym_proc and (ym_exes & scan_exes):
@@ -463,6 +464,7 @@ class MediaService(QObject):
                         "duration": 0.0,
                         "thumbnail_b64": "",
                     }
+                    has_gsmtc_track = True
                     act_playing = True
                     if not any(x.source_id == "yandex_music" for x in sessions):
                         sessions.append(
@@ -479,8 +481,8 @@ class MediaService(QObject):
                         )
                     break
 
-        # Fallback / supplement for AIMP / Winamp desktop windows
-        if not act_playing and (
+        # Fallback / supplement for AIMP / Winamp desktop windows ONLY if GSMTC has no track
+        if (not has_gsmtc_track) and (
             not self.preferred_app_id
             or any(k in self.preferred_app_id.lower() for k in ("aimp", "winamp"))
         ):
@@ -513,7 +515,7 @@ class MediaService(QObject):
                 else:
                     a_art, a_tr = "", cleaned
                 a_status = "Paused" if is_paused else "Playing"
-                if (not act_raw) or (not act_playing and a_status == "Playing"):
+                if not has_gsmtc_track:
                     act_raw = {
                         "app_id": aexe,
                         "title": a_tr.strip(),
@@ -524,6 +526,7 @@ class MediaService(QObject):
                         "duration": 0.0,
                         "thumbnail_b64": "",
                     }
+                    has_gsmtc_track = True
                     act_playing = a_status == "Playing"
                 if not any(x.source_id in ("aimp", "winamp") for x in sessions):
                     sessions.append(
@@ -540,13 +543,13 @@ class MediaService(QObject):
                     )
                 break
 
-        # Fallback / supplement for Spotify.exe desktop window if GSMTC has no playing track (and Spotify window IS playing or nothing else active)
-        if (not act_playing) and (
+        # Fallback / supplement for Spotify.exe desktop window ONLY if GSMTC has no track at all
+        if (not has_gsmtc_track) and (
             not self.preferred_app_id or "spotify" in self.preferred_app_id.lower()
         ):
             if sp is not None:
                 _, sp_status, sp_artist, sp_title = sp
-                if (sp_title or sp_artist) and (sp_status == "Playing" or not act_raw or not (act_raw.get("title") or act_raw.get("artist"))):
+                if sp_title or sp_artist:
                     act_raw = {
                         "app_id": "spotify.exe",
                         "title": sp_title,
@@ -557,6 +560,7 @@ class MediaService(QObject):
                         "duration": 0.0,
                         "thumbnail_b64": "",
                     }
+                    has_gsmtc_track = True
                     if not any(x.source_id == "spotify" for x in sessions):
                         sessions.append(
                             MediaSessionInfo(
@@ -596,10 +600,10 @@ class MediaService(QObject):
             return MediaStateSnapshot(active=None, sessions=sessions)
 
         b64 = act_raw.get("thumbnail_b64") or ""
+        t_clean = (act_raw.get("title") or "").strip().lower()
+        a_clean = (act_raw.get("artist") or "").strip().lower()
         art_key = hashlib.sha1(
-            f"{act_raw.get('app_id')}|{act_raw.get('title')}|{act_raw.get('artist')}|{act_raw.get('album')}".encode(
-                "utf-8", errors="ignore"
-            )
+            f"{t_clean}|{a_clean}".encode("utf-8", errors="ignore")
         ).hexdigest()[:16]
         sid, sname, sico, default_brand_color = identify_media_source(
             act_raw.get("app_id", ""),
@@ -678,15 +682,21 @@ class MediaService(QObject):
 
         # Trigger async lyrics fetch if track changed
         lkey = LyricsService.make_key(active.artist, active.title, active.album, active.duration)
-        if lkey != self._lyrics_cache_key and lkey not in self._lyrics_loading:
+        if lkey != self._lyrics_cache_key:
             self._lyrics_cache_key = lkey
-            self._current_lyrics = None
-            self._lyrics_loading.add(lkey)
-            threading.Thread(
-                target=self._fetch_lyrics_bg,
-                args=(lkey, active.title, active.artist, active.album, active.duration),
-                daemon=True,
-            ).start()
+            cached_lyr = self.lyrics_service._cache.get(lkey)
+            self._current_lyrics = cached_lyr
+            if cached_lyr is None and lkey not in self._lyrics_loading:
+                self._lyrics_loading.add(lkey)
+                threading.Thread(
+                    target=self._fetch_lyrics_bg,
+                    args=(lkey, active.title, active.artist, active.album, active.duration),
+                    daemon=True,
+                ).start()
+        elif self._current_lyrics is None and lkey not in self._lyrics_loading:
+            cached_lyr = self.lyrics_service._cache.get(lkey)
+            if cached_lyr is not None:
+                self._current_lyrics = cached_lyr
 
         lyric_line = self._extract_active_lyric_line(self._current_lyrics, lkey, active.position, active.duration)
 
@@ -729,40 +739,72 @@ class MediaService(QObject):
 
     def _fetch_art_bg(self, art_key: str, title: str, artist: str, fallback_color: str) -> None:
         try:
-            q = urllib.parse.quote(f"{artist} {title}".strip())
-            if not q:
+            import httpx
+
+            q_raw = f"{artist} {title}".strip()
+            if not q_raw:
                 return
             art_url = ""
-            # 1) Fast iTunes artwork lookup
-            try:
-                url = f"https://itunes.apple.com/search?term={q}&entity=song&limit=1"
-                req = urllib.request.Request(url, headers={"User-Agent": "BorhIsland/1.0"})
-                with urllib.request.urlopen(req, timeout=2.5) as resp:
-                    data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                results = data.get("results") or []
-                if results:
-                    art_url = str(results[0].get("artworkUrl100") or "").replace("100x100bb", "600x600bb")
-            except Exception:
-                art_url = ""
-
-            # 2) Deezer artwork fallback if iTunes returned no match
-            if not art_url:
+            img_bytes = b""
+            for trust_env in (False, True):
+                if img_bytes:
+                    break
                 try:
-                    d_url = f"https://api.deezer.com/search?q={q}&limit=1"
-                    d_req = urllib.request.Request(d_url, headers={"User-Agent": "BorhIsland/1.0"})
-                    with urllib.request.urlopen(d_req, timeout=2.5) as d_resp:
-                        d_data = json.loads(d_resp.read().decode("utf-8", errors="ignore"))
-                    d_hits = d_data.get("data") or []
-                    if d_hits:
-                        alb = d_hits[0].get("album") or {}
-                        art_url = str(alb.get("cover_big") or alb.get("cover_xl") or alb.get("cover_medium") or alb.get("cover") or "")
-                except Exception:
-                    art_url = ""
+                    with httpx.Client(timeout=3.5, headers={"User-Agent": "BorhIsland/1.0"}, trust_env=trust_env, follow_redirects=True) as client:
+                        # 1) Fast iTunes RU + global artwork lookup
+                        for country in ("RU", "US"):
+                            if art_url:
+                                break
+                            try:
+                                r = client.get(
+                                    "https://itunes.apple.com/search",
+                                    params={"term": q_raw, "country": country, "entity": "song", "limit": 1},
+                                )
+                                if r.status_code == 200:
+                                    results = r.json().get("results") or []
+                                    if results:
+                                        art_url = str(results[0].get("artworkUrl100") or "").replace("100x100bb", "600x600bb")
+                            except Exception:
+                                pass
 
-            if not art_url:
+                        # 2) Yandex Music Public Search API (ideal for Russian & CIS tracks)
+                        if not art_url:
+                            try:
+                                r_ym = client.get(
+                                    "https://api.music.yandex.net/search",
+                                    params={"text": q_raw, "type": "track", "page": 0},
+                                )
+                                if r_ym.status_code == 200:
+                                    tracks = ((r_ym.json().get("result") or {}).get("tracks") or {}).get("results") or []
+                                    for trk in tracks:
+                                        cov = str(trk.get("coverUri") or trk.get("ogImage") or "")
+                                        if cov:
+                                            art_url = "https://" + cov.replace("%%", "400x400")
+                                            break
+                            except Exception:
+                                pass
+
+                        # 3) Deezer artwork fallback
+                        if not art_url:
+                            try:
+                                r_dz = client.get("https://api.deezer.com/search", params={"q": q_raw, "limit": 1})
+                                if r_dz.status_code == 200:
+                                    d_hits = r_dz.json().get("data") or []
+                                    if d_hits:
+                                        alb = d_hits[0].get("album") or {}
+                                        art_url = str(alb.get("cover_big") or alb.get("cover_xl") or alb.get("cover_medium") or alb.get("cover") or "")
+                            except Exception:
+                                pass
+
+                        if art_url:
+                            r_img = client.get(art_url)
+                            if r_img.status_code == 200 and r_img.content:
+                                img_bytes = r_img.content
+                except Exception:
+                    continue
+
+            if not img_bytes:
                 return
-            with urllib.request.urlopen(urllib.request.Request(art_url, headers={"User-Agent": "BorhIsland/1.0"}), timeout=2.5) as r2:
-                img_bytes = r2.read()
             qimg = QImage.fromData(img_bytes)
             if not qimg.isNull():
                 prev = self._art_cache.get(art_key)

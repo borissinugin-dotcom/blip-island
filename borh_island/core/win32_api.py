@@ -73,6 +73,20 @@ if sys.platform == "win32":
         ctypes.POINTER(wt.DWORD),
     ]
     kernel32.QueryFullProcessImageNameW.restype = wt.BOOL
+    advapi32.OpenProcessToken.argtypes = [
+        wt.HANDLE,
+        wt.DWORD,
+        ctypes.POINTER(wt.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wt.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wt.HANDLE,
+         ctypes.c_uint,
+        ctypes.c_void_p,
+        wt.DWORD,
+        ctypes.POINTER(wt.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wt.BOOL
 
 VK_LBUTTON = 0x01
 SNIPPING_OVERLAY_EXES = {

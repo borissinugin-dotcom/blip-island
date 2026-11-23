@@ -379,13 +379,30 @@ def _draw_music(p: QPainter, s: float, fg: QColor, acc: QColor) -> None:
 
 
 def _draw_timer(p: QPainter, s: float, fg: QColor, acc: QColor) -> None:
-    p.setPen(_pen(fg, s * 0.09))
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawEllipse(QPointF(s * 0.50, s * 0.54), s * 0.30, s * 0.30)
-    p.drawLine(QPointF(s * 0.41, s * 0.15), QPointF(s * 0.59, s * 0.15))
-    p.setPen(_pen(acc, s * 0.09))
-    p.drawLine(QPointF(s * 0.50, s * 0.54), QPointF(s * 0.50, s * 0.36))
-    p.drawLine(QPointF(s * 0.50, s * 0.54), QPointF(s * 0.64, s * 0.54))
+    cx, cy, r = s * 0.50, s * 0.53, s * 0.34
+    # Cute rounded alarm/watch ears & top crown button
+    p.setPen(_pen(acc, s * 0.085))
+    p.drawLine(QPointF(s * 0.22, s * 0.24), QPointF(s * 0.32, s * 0.16))
+    p.drawLine(QPointF(s * 0.78, s * 0.24), QPointF(s * 0.68, s * 0.16))
+    p.drawLine(QPointF(s * 0.43, s * 0.13), QPointF(s * 0.57, s * 0.13))
+    # Glossy round clock dial
+    p.setPen(_pen(fg, s * 0.085))
+    p.setBrush(QColor(fg.red(), fg.green(), fg.blue(), 22))
+    p.drawEllipse(QPointF(cx, cy), r, r)
+    # 4 cardinal tick dots
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(fg.red(), fg.green(), fg.blue(), 170))
+    for ang_deg in (0, 90, 180, 270):
+        rad_a = math.radians(ang_deg)
+        p.drawEllipse(QPointF(cx + math.cos(rad_a) * r * 0.74, cy + math.sin(rad_a) * r * 0.74), s * 0.028, s * 0.028)
+    # Crisp hour + minute hands + center jewel
+    p.setPen(_pen(fg, s * 0.085))
+    p.drawLine(QPointF(cx, cy), QPointF(cx, cy - r * 0.52))
+    p.setPen(_pen(acc, s * 0.085))
+    p.drawLine(QPointF(cx, cy), QPointF(cx + r * 0.46, cy + r * 0.22))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(acc)
+    p.drawEllipse(QPointF(cx, cy), s * 0.055, s * 0.055)
 
 
 def _draw_screenshot(p: QPainter, s: float, fg: QColor, acc: QColor) -> None:
