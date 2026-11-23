@@ -4070,11 +4070,12 @@ class AtmosphericScenePainter:
         wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
 
         # -1. Distant misty 2D conifer forest spanning full liquid stretch width (-190..+190 beyond core)
+        dpr_f = max(1.0, float(p.device().devicePixelRatioF())) if p.device() is not None else 1.0
         horizon_y = turf_y + 4.0 * sc
         pad_forest_x = 190.0
         f_w = max(64, int(math.ceil(core.width() + pad_forest_x * 2.0)))
         f_h = max(160, int(math.ceil(290.0 * sc)))
-        forest_key = (f_w, f_h, round(light_w * 4.0), round(snow_amt * 4.0), round(sc, 2))
+        forest_key = (f_w, f_h, round(dpr_f, 2), round(light_w * 4.0), round(snow_amt * 4.0), round(sc, 2))
         cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
         if cache_dict is None:
             cache_dict = {}
@@ -4090,7 +4091,12 @@ class AtmosphericScenePainter:
                 (1.04, 220, 8.0, (16, 52, 36), (8, 28, 20)),
             )
             for layer_idx, (l_scale, l_alpha, y_off, top_rgb, bot_rgb) in enumerate(layer_specs):
-                img_f = QImage(f_w, f_h, QImage.Format.Format_ARGB32_Premultiplied)
+                img_f = QImage(
+                    max(1, int(round(f_w * dpr_f))),
+                    max(1, int(round(f_h * dpr_f))),
+                    QImage.Format.Format_ARGB32_Premultiplied,
+                )
+                img_f.setDevicePixelRatio(dpr_f)
                 img_f.fill(0)
                 fp_p = QPainter(img_f)
                 fp_p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -4245,10 +4251,15 @@ class AtmosphericScenePainter:
         cab_img_h = max(64, int(math.ceil(cab_h + cab_pad_top + cab_pad_bot)))
         cab_ox = cab_l - cab_pad_x
         cab_oy = cab_t - cab_pad_top
-        cabin_key = (cab_img_w, cab_img_h, round(sc, 2), round(light_w * 5.0), round(rain_amt * 3.0), round(roof_snow * 5.0))
+        cabin_key = (cab_img_w, cab_img_h, round(dpr_f, 2), round(sc, 2), round(light_w * 5.0), round(rain_amt * 3.0), round(roof_snow * 5.0))
         cabin_cache = getattr(AtmosphericScenePainter, "_cabin_cache", None)
         if cabin_cache is None or cabin_cache[0] != cabin_key:
-            cab_img = QImage(cab_img_w, cab_img_h, QImage.Format.Format_ARGB32_Premultiplied)
+            cab_img = QImage(
+                max(1, int(round(cab_img_w * dpr_f))),
+                max(1, int(round(cab_img_h * dpr_f))),
+                QImage.Format.Format_ARGB32_Premultiplied,
+            )
+            cab_img.setDevicePixelRatio(dpr_f)
             cab_img.fill(0)
             cp = QPainter(cab_img)
             cp.setRenderHint(QPainter.RenderHint.Antialiasing)

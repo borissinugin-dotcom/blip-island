@@ -2655,9 +2655,11 @@ class IslandWindow(QWidget):
                     target_amp = min(1.08, max(0.16, (pull_len + 5.0) / 58.0))
         self._lmb_was_down = lmb_down
 
-        # Calm fluid momentum: zero sinusoidal standing vibration when cursor hovers still!
-        ambient_range = 120.0 if self._expanded else 44.0
-        near_fluid = active_vis and dist <= ambient_range
+        # Calm fluid momentum: only trigger outer liquid edge swirl near the perimeter rim (never when moving over center panel!)
+        ambient_range = 85.0 if self._expanded else 44.0
+        near_fluid = active_vis and (
+            (0.5 < dist <= ambient_range) or (dist <= 0.5 and (not self._expanded or m_in <= 34.0))
+        )
         if near_fluid:
             tx_norm = max(0.0, min(1.0, (local.x() - core.left()) / max(1.0, core.width())))
             ty_norm = max(0.0, min(1.0, (local.y() - core.top()) / max(1.0, core.height())))
@@ -3729,16 +3731,18 @@ class IslandWindow(QWidget):
         liquid_pull = (self._drop_amp > 0.02) or (self._indent_amp > 0.02)
         scroll_running = bool(getattr(self.panel, "_smooth_scroll_active", False))
         fast_motion = morph_running or scroll_running or liquid_pull
-        # Fast cached Frost Glass across all cards & buttons (Liquid Glass removed to eliminate render stutter)
+        # Fast cached Frost Glass across all cards & buttons (throttled to ~18Hz during continuous motion so blur never lags)
         f_q = "low" if fast_motion else ref_q
-        fk = (bg_sig, f_q, bg_src.width(), bg_src.height()) if bg_sig is not None else None
+        now_fb = time.monotonic()
+        base_f_sig = bg_sig[0] if (isinstance(bg_sig, tuple) and len(bg_sig) == 2) else bg_sig
+        fk = (base_f_sig, f_q, bg_src.width(), bg_src.height()) if base_f_sig is not None else None
         fc = getattr(self, "_frost_bg_cache", None)
-        if fk is not None and fc is not None and fc[0] == fk:
+        if fk is not None and fc is not None and fc[0] == fk and (len(fc) < 3 or (now_fb - fc[2]) < 0.055):
             frost_img = fc[1]
         else:
             frost_img = build_frost_bg_image(bg_src, quality=f_q)
             if fk is not None:
-                self._frost_bg_cache = (fk, frost_img)
+                self._frost_bg_cache = (fk, frost_img, now_fb)
         fw, fh = float(self.width()), float(self.height())
         render_frost_batch(p, card_targets, frost_img, fw, fh)
         render_frost_batch(p, btn_targets, frost_img, fw, fh)
@@ -4113,7 +4117,7 @@ class IslandWindow(QWidget):
                     painter.fillRect(canvas_rect, sg)
 
             if use_glass:
-                dpr = min(1.25, max(1.0, float(self.devicePixelRatioF())))
+                dpr = max(1.0, float(self.devicePixelRatioF()))
                 pw = max(1, int(round(self.width() * dpr)))
                 ph = max(1, int(round(self.height() * dpr)))
 
@@ -4293,8 +4297,8 @@ class IslandWindow(QWidget):
                         self._exp_surface_cache = (surf_key, now_c, bg_img)
                         bg_sig = (surf_key, now_c)
 
-                    if fast_glass:
-                        # During morph / scroll, skip heavy numpy 3D refraction so weak PCs stay 60/120+ FPS
+                    if fast_glass or live_scene_motion or use_weather_atmo:
+                        # During live motion / weather animation, draw bg + frost directly to p (saves full-window QImage copy!)
                         self._exp_composite_cache = None
                         self._exp_backdrop_img = bg_img
                         p.drawImage(0, 0, bg_img)

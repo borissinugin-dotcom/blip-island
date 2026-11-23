@@ -283,21 +283,20 @@ def run_refraction_benchmark() -> tuple[str, float]:
 
 
 def build_frost_bg_image(bg_src: QImage | QPixmap, quality: str = "ultra") -> QImage:
-    """Create a smooth, shimmer-free blurred background QImage for Frost Glass tied to glass quality."""
+    """Create a silky-smooth, zero-pixelation blurred background QImage for Frost Glass."""
     q = str(quality or "ultra").lower()
     if q == "low":
-        scale_f, passes = 0.12, 1
+        scale_f, passes = 0.22, 2
     elif q == "medium":
-        scale_f, passes = 0.14, 2
+        scale_f, passes = 0.25, 2
     elif q == "high":
-        scale_f, passes = 0.16, 2
+        scale_f, passes = 0.28, 3
     else:
-        scale_f, passes = 0.18, 2
+        scale_f, passes = 0.30, 3
 
-    sw = max(24, int(round(bg_src.width() * scale_f)))
-    sh = max(24, int(round(bg_src.height() * scale_f)))
+    sw = max(32, int(round(bg_src.width() * scale_f)))
+    sh = max(32, int(round(bg_src.height() * scale_f)))
     img = bg_src if isinstance(bg_src, QImage) else bg_src.toImage()
-    # SmoothTransformation prevents thin swaying grass blades from aliasing/shimmering
     small = (
         img.scaled(sw, sh, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
         .convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
@@ -306,13 +305,14 @@ def build_frost_bg_image(bg_src: QImage | QPixmap, quality: str = "ultra") -> QI
     ptr.setsize(small.sizeInBytes())
     arr = np.frombuffer(ptr, dtype=np.uint8).reshape((sh, sw, 4)).astype(np.uint16)
 
+    # Wide separable 5-tap binomial/box blur in-place (smooth Gaussian-like blur with zero blocky artifacts)
     for _ in range(passes):
-        padded_x = np.pad(arr, ((0, 0), (1, 1), (0, 0)), mode="edge")
-        arr = (padded_x[:, :-2] + padded_x[:, 1:-1] + padded_x[:, 2:]) // 3
-        padded_y = np.pad(arr, ((1, 1), (0, 0), (0, 0)), mode="edge")
-        arr = (padded_y[:-2, :] + padded_y[1:-1, :] + padded_y[2:, :]) // 3
+        p_x = np.pad(arr, ((0, 0), (2, 2), (0, 0)), mode="edge")
+        arr = (p_x[:, :-4] + (p_x[:, 1:-3] << 1) + (p_x[:, 2:-2] << 1) + (p_x[:, 3:-1] << 1) + p_x[:, 4:]) >> 3
+        p_y = np.pad(arr, ((2, 2), (0, 0), (0, 0)), mode="edge")
+        arr = (p_y[:-4, :] + (p_y[1:-3, :] << 1) + (p_y[2:-2, :] << 1) + (p_y[3:-1, :] << 1) + p_y[4:, :]) >> 3
 
-    # Pre-bake subtle translucent white frost veil (+16/255 white) directly in NumPy pass (eliminates 2nd drawPath pass)
+    # Pre-bake subtle translucent white frost veil (+16/255 white) directly in NumPy pass
     arr = ((arr * 239) + (255 * 16)) >> 8
     out_img = QImage(sw, sh, QImage.Format.Format_ARGB32_Premultiplied)
     optr = out_img.bits()
@@ -361,7 +361,7 @@ def render_frost_batch(
     full_w: float,
     full_h: float,
 ) -> None:
-    """Batch-render blurred Frost Glass across many cards/buttons via cached scaled QBrush(QPixmap) without CPU upscale spikes."""
+    """Batch-render blurred Frost Glass across cards/buttons using pre-smoothed QPixmap brush (zero mosaic blocks)."""
     if not targets or full_w <= 1.0 or full_h <= 1.0 or frost_img.isNull():
         return
     from PyQt6.QtGui import QBrush, QPixmap, QTransform
@@ -371,13 +371,14 @@ def render_frost_batch(
     ck_img = (int(frost_img.cacheKey()), tw, th)
     cached_b = _FROST_BRUSH_CACHE.get(ck_img)
     if cached_b is None:
-        if len(_FROST_BRUSH_CACHE) >= 12:
+        if len(_FROST_BRUSH_CACHE) >= 8:
             _FROST_BRUSH_CACHE.clear()
-        pm_s = QPixmap.fromImage(frost_img)
-        tx = QTransform()
-        tx.scale(full_w / max(1.0, float(pm_s.width())), full_h / max(1.0, float(pm_s.height())))
+        # Pre-upscale with SmoothTransformation so QBrush(QPixmap) has 1:1 smooth bilinear pixels (never nearest-neighbor blocks!)
+        smooth_img = frost_img.scaled(
+            tw, th, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        pm_s = QPixmap.fromImage(smooth_img)
         brush = QBrush(pm_s)
-        brush.setTransform(tx)
         cached_b = (pm_s, brush)
         _FROST_BRUSH_CACHE[ck_img] = cached_b
     else:
