@@ -165,16 +165,16 @@ def _get_smoke_layer_lut(rgb: tuple[int, int, int]) -> tuple[QImage, ...]:
 
 def _get_glow_disc_img(rgb: tuple[int, int, int], peak_alpha: int, mid_alpha: int) -> QImage:
     """Cache 128x128 radial atmospheric halo QImage (eliminates per-frame QRadialGradient)."""
-    r_c = max(0, min(255, int(rgb[0]))) & 0xF8
-    g_c = max(0, min(255, int(rgb[1]))) & 0xF8
-    b_c = max(0, min(255, int(rgb[2]))) & 0xF8
-    pa = max(0, min(255, int(peak_alpha))) & 0xFC
-    ma = max(0, min(255, int(mid_alpha))) & 0xFC
+    r_c = max(0, min(255, int(rgb[0]))) & 0xF0
+    g_c = max(0, min(255, int(rgb[1]))) & 0xF0
+    b_c = max(0, min(255, int(rgb[2]))) & 0xF0
+    pa = max(0, min(255, int(peak_alpha))) & 0xE0
+    ma = max(0, min(255, int(mid_alpha))) & 0xE0
     key = (r_c, g_c, b_c, pa, ma)
     cached = _GLOW_DISC_CACHE.get(key)
     if cached is not None:
         return cached
-    _evict_oldest(_GLOW_DISC_CACHE, 64, 16)
+    _evict_oldest(_GLOW_DISC_CACHE, 512, 64)
 
     img = QImage(128, 128, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(0)
@@ -3767,22 +3767,23 @@ class AtmosphericScenePainter:
             def _draw_canopy(cp: QPainter) -> None:
                 cp.setPen(Qt.PenStyle.NoPen)
                 cp_draw = cp.drawPath
+                fp = QPainterPath()
+                fp_clear = fp.clear
+                fp_move = fp.moveTo
+                fp_quad = fp.quadTo
+                fp_close = fp.closeSubpath
                 for sh_i in range(6):
                     bucket = shade_buckets[sh_i]
                     if not bucket:
                         continue
-                    fp = QPainterPath()
-                    fp.setFillRule(Qt.FillRule.WindingFill)
-                    fp_move = fp.moveTo
-                    fp_quad = fp.quadTo
-                    fp_close = fp.closeSubpath
+                    cp.setBrush(canopy_grads[sh_i])
                     for l0x, l0y, cx1, cy1, tx_b, ty_b, cx2, cy2, r0x, r0y in bucket:
+                        fp_clear()
                         fp_move(l0x, l0y)
                         fp_quad(cx1, cy1, tx_b, ty_b)
                         fp_quad(cx2, cy2, r0x, r0y)
                         fp_close()
-                    cp.setBrush(canopy_grads[sh_i])
-                    cp_draw(fp)
+                        cp_draw(fp)
                 if has_ribs:
                     cp.setBrush(Qt.BrushStyle.NoBrush)
                     cp.setPen(QPen(rib_col, 0.85 if wet else 0.56))
@@ -4073,7 +4074,7 @@ class AtmosphericScenePainter:
         pad_forest_x = 190.0
         f_w = max(64, int(math.ceil(core.width() + pad_forest_x * 2.0)))
         f_h = max(160, int(math.ceil(290.0 * sc)))
-        forest_key = (f_w, f_h, round(light_w * 10.0), round(snow_amt * 8.0), round(sc, 2))
+        forest_key = (f_w, f_h, round(light_w * 4.0), round(snow_amt * 4.0), round(sc, 2))
         cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
         if cache_dict is None:
             cache_dict = {}
@@ -4202,29 +4203,15 @@ class AtmosphericScenePainter:
                 p.drawEllipse(QPointF(px, py), pr * 1.15, pr * 0.85)
             p.restore()
 
-        # 0. Flat 2D Front-Facing Old Wooden Log Cabin on the Horizon
+        # 0. Flat 2D Front-Facing Old Wooden Log Cabin on the Horizon (cached static body + live interactive chimney smoke)
         cab_w = 176.0 * sc
         cab_h = 132.0 * sc
         roof_h = 72.0 * sc
         cab_l = hx - cab_w * 0.50
         cab_t = hy - cab_h
-
-        p.save()
-        # Stone chimney on right side of roof with mortar lines + cloud-style rising smoke drifting right
         ch_x = hx + cab_w * 0.22
         ch_w = 24.0 * sc
         ch_top = cab_t - roof_h * 0.86
-        p.setPen(QPen(QColor(38, 42, 50), 1.2))
-        p.setBrush(QColor(84, 88, 98))
-        p.drawRoundedRect(QRectF(ch_x, ch_top, ch_w, 58.0 * sc), 2.0, 2.0)
-        # Crisp brick/stone mortar lines on chimney
-        p.setPen(QPen(QColor(52, 56, 66, 180), 1.0))
-        for br_y in range(1, 5):
-            yy = ch_top + br_y * 10.0 * sc
-            p.drawLine(QPointF(ch_x + 1.0, yy), QPointF(ch_x + ch_w - 1.0, yy))
-        p.setPen(QPen(QColor(38, 42, 50), 1.2))
-        p.setBrush(QColor(102, 106, 118))
-        p.drawRoundedRect(QRectF(ch_x - 3.5 * sc, ch_top - 4.5 * sc, ch_w + 7.0 * sc, 7.0 * sc), 2.0, 2.0)
 
         # Cloud-style volumetric smoke rising from chimney up into the clouds, interacting with mouse cursor!
         smoke_rise_h = max(130.0 * sc, ch_top - core.top() - 10.0 * sc)
@@ -4235,7 +4222,6 @@ class AtmosphericScenePainter:
             curl_x = math.sin(phase_t * 1.6 + sk * 1.15 + st * 4.5) * (5.0 + st * 11.0) * sc
             sx_s = ch_x + ch_w * 0.5 + drift_r + curl_x
             sy_s = ch_top - 4.0 * sc - (st ** 0.85) * smoke_rise_h
-            # Cursor interaction: deflect & swirl smoke puffs around the mouse pointer
             if cursor_local is not None:
                 dx_c = sx_s - cursor_local.x()
                 dy_c = sy_s - cursor_local.y()
@@ -4251,182 +4237,194 @@ class AtmosphericScenePainter:
                 sm_img = _get_glow_disc_img(smoke_rgb, sa, 36)
                 p.drawImage(QRectF(sx_s - sr_s, sy_s - sr_s * 0.72, sr_s * 2.0, sr_s * 1.44), sm_img)
 
-        # Stone foundation plinth at base of cabin
-        p.setPen(QPen(QColor(42, 46, 54), 1.2))
-        p.setBrush(QColor(74, 78, 88))
-        p.drawRoundedRect(QRectF(cab_l - 4.0 * sc, hy - 10.0 * sc, cab_w + 8.0 * sc, 13.0 * sc), 2.0, 2.0)
-
-        # Massive horizontal rich-brown weathered logs (10 stacked courses with crisp wood grain & notched ends)
-        n_logs = 10
-        log_h = (cab_h - 8.0 * sc) / float(n_logs)
-        wet_dim = 1.0 - 0.12 * rain_amt
-        for li in range(n_logs):
-            ly = cab_t + li * log_h
-            shade = ((li * 29) % 5) * 4
-            lg = QLinearGradient(QPointF(cab_l, ly), QPointF(cab_l, ly + log_h))
-            lg.setColorAt(0.0, QColor(int((156 - shade) * wet_dim), int((100 - shade) * wet_dim), int((58 - shade // 2) * wet_dim)))
-            lg.setColorAt(0.45, QColor(int((126 - shade) * wet_dim), int((76 - shade) * wet_dim), int((42 - shade // 2) * wet_dim)))
-            lg.setColorAt(1.0, QColor(int((76 - shade) * wet_dim), int((44 - shade // 2) * wet_dim), int((24 - shade // 3) * wet_dim)))
-            p.setPen(QPen(QColor(46, 26, 14, 235), max(1.2, 1.4 * sc)))
-            p.setBrush(lg)
-            p.drawRoundedRect(QRectF(cab_l - 11.0 * sc, ly, cab_w + 22.0 * sc, log_h + 0.5), log_h * 0.38, log_h * 0.38)
-            # Crisp wood grain lines along each timber
-            p.setPen(QPen(QColor(58, 34, 18, 115), 0.9))
-            g_off = ((li * 19) % 24) * sc
-            p.drawLine(QPointF(cab_l + 8.0 * sc + g_off, ly + log_h * 0.35), QPointF(cab_l + cab_w * 0.48 + g_off, ly + log_h * 0.35))
-            p.drawLine(QPointF(cab_l + cab_w * 0.55 - g_off * 0.5, ly + log_h * 0.68), QPointF(cab_l + cab_w - 10.0 * sc, ly + log_h * 0.68))
-            # End-grain rings on protruding log ends
-            p.setPen(QPen(QColor(56, 32, 18, 190), 1.0))
-            p.setBrush(QColor(174, 120, 74, 210))
-            p.drawEllipse(QRectF(cab_l - 11.0 * sc, ly + 1.0, log_h * 0.72, log_h - 2.0))
-            p.drawEllipse(QRectF(cab_l + cab_w + 11.0 * sc - log_h * 0.72, ly + 1.0, log_h * 0.72, log_h - 2.0))
-
-        # Gable triangle upper wall (rich warm brown, flat 2D)
-        gable = QPainterPath()
-        gable.moveTo(cab_l + 4.0 * sc, cab_t + 2.0)
-        gable.lineTo(hx, cab_t - roof_h + 6.0 * sc)
-        gable.lineTo(cab_l + cab_w - 4.0 * sc, cab_t + 2.0)
-        gable.closeSubpath()
-        p.setPen(QPen(QColor(58, 34, 18), 1.2))
-        p.setBrush(QColor(int(116 * wet_dim), int(70 * wet_dim), int(38 * wet_dim)))
-        p.drawPath(gable)
-
-        # Heavy wooden door on left-center + cozy porch lantern
-        door_w = 38.0 * sc
-        door_h = 74.0 * sc
-        door_x = hx - cab_w * 0.22 - door_w * 0.5
-        door_y = hy - door_h - 4.0 * sc
-        p.setPen(QPen(QColor(38, 24, 15), max(1.5, 2.0 * sc)))
-        p.setBrush(QColor(68, 42, 26))
-        p.drawRoundedRect(QRectF(door_x, door_y, door_w, door_h), 3.0 * sc, 3.0 * sc)
-        # Plank lines & iron handle
-        p.setPen(QPen(QColor(40, 24, 14, 170), 1.0))
-        p.drawLine(QPointF(door_x + door_w * 0.33, door_y + 2.0), QPointF(door_x + door_w * 0.33, door_y + door_h - 2.0))
-        p.drawLine(QPointF(door_x + door_w * 0.66, door_y + 2.0), QPointF(door_x + door_w * 0.66, door_y + door_h - 2.0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(190, 165, 110))
-        p.drawEllipse(QPointF(door_x + door_w - 6.5 * sc, door_y + door_h * 0.54), 2.4 * sc, 2.4 * sc)
-
-        # Windows (main window right of door + attic round/arch window) — glow warmly at night, glassy by day!
-        win_w = 46.0 * sc
-        win_h = 42.0 * sc
-        win_x = hx + cab_w * 0.18 - win_w * 0.5
-        win_y = cab_t + 44.0 * sc
-        attic_r = 14.0 * sc
-        attic_y = cab_t - roof_h * 0.36
-
-        if light_w > 0.08:
-            # Warm amber glow spilling around windows & porch lantern
-            w_glow = _get_glow_disc_img((255, 196, 88), int(round(145 * light_w)), 64)
-            gs = 110.0 * sc
-            p.drawImage(QRectF(win_x + win_w * 0.5 - gs * 0.5, win_y + win_h * 0.5 - gs * 0.5, gs, gs), w_glow)
-            p.drawImage(QRectF(hx - gs * 0.35, attic_y - gs * 0.35, gs * 0.7, gs * 0.7), w_glow)
-            # Porch lantern next to door
-            lan_x, lan_y = door_x + door_w + 10.0 * sc, door_y + 14.0 * sc
-            p.drawImage(QRectF(lan_x - 24.0 * sc, lan_y - 24.0 * sc, 48.0 * sc, 48.0 * sc), w_glow)
-            p.setBrush(QColor(255, 224, 130, int(round(235 * light_w))))
-            p.drawEllipse(QPointF(lan_x, lan_y), 3.6 * sc, 4.5 * sc)
-
-        # Window glass color blends smoothly between cool daylight sky reflection and warm night interior
-        day_glass = QColor(72, 108, 138, 220)
-        night_glass = QColor(255, 206, 98, 248)
-        wg = QColor(
-            int(round(day_glass.red() * (1.0 - light_w) + night_glass.red() * light_w)),
-            int(round(day_glass.green() * (1.0 - light_w) + night_glass.green() * light_w)),
-            int(round(day_glass.blue() * (1.0 - light_w) + night_glass.blue() * light_w)),
-            int(round(day_glass.alpha() * (1.0 - light_w) + night_glass.alpha() * light_w)),
-        )
-        p.setPen(QPen(QColor(44, 28, 18), max(2.0, 3.0 * sc)))
-        p.setBrush(wg)
-        p.drawRoundedRect(QRectF(win_x, win_y, win_w, win_h), 3.0 * sc, 3.0 * sc)
-        # Wooden muntins (crossbars) + sill
-        p.setPen(QPen(QColor(52, 34, 22), max(1.5, 2.2 * sc)))
-        p.drawLine(QPointF(win_x + win_w * 0.5, win_y), QPointF(win_x + win_w * 0.5, win_y + win_h))
-        p.drawLine(QPointF(win_x, win_y + win_h * 0.5), QPointF(win_x + win_w, win_y + win_h * 0.5))
-        p.setBrush(QColor(72, 46, 28))
-        p.drawRoundedRect(QRectF(win_x - 4.0 * sc, win_y + win_h, win_w + 8.0 * sc, 5.5 * sc), 2.0, 2.0)
-
-        # Attic round window
-        p.setPen(QPen(QColor(44, 28, 18), max(1.8, 2.4 * sc)))
-        p.setBrush(wg)
-        p.drawEllipse(QPointF(hx, attic_y), attic_r, attic_r)
-        p.drawLine(QPointF(hx - attic_r, attic_y), QPointF(hx + attic_r, attic_y))
-        p.drawLine(QPointF(hx, attic_y - attic_r), QPointF(hx, attic_y + attic_r))
-
-        # Flat 2D Pitched wooden shingle roof with overhanging eaves
-        overhang = 22.0 * sc
-        roof_p = QPainterPath()
-        roof_p.moveTo(hx, cab_t - roof_h - 4.0 * sc)
-        roof_p.lineTo(cab_l + cab_w + overhang, cab_t + 8.0 * sc)
-        roof_p.lineTo(cab_l + cab_w + overhang - 6.0 * sc, cab_t + 16.0 * sc)
-        roof_p.lineTo(hx, cab_t - roof_h + 7.0 * sc)
-        roof_p.lineTo(cab_l - overhang + 6.0 * sc, cab_t + 16.0 * sc)
-        roof_p.lineTo(cab_l - overhang, cab_t + 8.0 * sc)
-        roof_p.closeSubpath()
-        rg = QLinearGradient(QPointF(hx, cab_t - roof_h), QPointF(hx, cab_t + 14.0 * sc))
-        rg.setColorAt(0.0, QColor(int(76 * wet_dim), int(48 * wet_dim), int(34 * wet_dim)))
-        rg.setColorAt(1.0, QColor(int(48 * wet_dim), int(30 * wet_dim), int(22 * wet_dim)))
-        p.setPen(QPen(QColor(30, 18, 12), 1.4))
-        p.setBrush(rg)
-        p.drawPath(roof_p)
-        # Crisp roof shingle lines
-        p.save()
-        p.setClipPath(roof_p)
-        p.setPen(QPen(QColor(32, 18, 10, 140), 1.0))
-        for sr in range(1, 6):
-            ry = (cab_t - roof_h) + sr * (roof_h / 5.5)
-            p.drawLine(QPointF(cab_l - overhang, ry), QPointF(cab_l + cab_w + overhang, ry))
-        p.restore()
-
-        # Natural pillowed snowdrifts clinging organically to roof slope + eaves + chimney cap + icicles
         roof_snow = max(snow_amt * 0.65, snow_accum)
-        if roof_snow > 0.04:
-            sn_alpha = int(round(242 * min(1.0, roof_snow * 1.45)))
-            sn_thick = (5.0 + 13.0 * roof_snow) * sc
-            # Pillowed upper ridge drift + scalloped overhang along left & right eaves
-            sn_roof = QPainterPath()
-            sn_roof.moveTo(hx, cab_t - roof_h - 6.0 * sc)
-            sn_roof.lineTo(cab_l + cab_w + overhang + 2.0 * sc, cab_t + 7.0 * sc)
-            # Scalloped bottom snow edge along right slope -> ridge -> left slope
-            for k_s in range(6, -1, -1):
-                u_s = k_s / 6.0
-                sx_e = hx + (cab_l + cab_w + overhang - hx) * u_s
-                sy_e = (cab_t - roof_h - 4.0 * sc) + (roof_h + 12.0 * sc) * u_s
-                bulge = sn_thick * (0.45 + 0.55 * (u_s ** 0.7)) * (0.85 + 0.25 * math.sin(u_s * 12.5))
-                sn_roof.lineTo(sx_e, sy_e + bulge)
-            for k_s in range(1, 7):
-                u_s = k_s / 6.0
-                sx_e = hx - (hx - (cab_l - overhang)) * u_s
-                sy_e = (cab_t - roof_h - 4.0 * sc) + (roof_h + 12.0 * sc) * u_s
-                bulge = sn_thick * (0.45 + 0.55 * (u_s ** 0.7)) * (0.85 + 0.25 * math.cos(u_s * 11.0))
-                sn_roof.lineTo(sx_e, sy_e + bulge)
-            sn_roof.lineTo(cab_l - overhang - 2.0 * sc, cab_t + 7.0 * sc)
-            sn_roof.closeSubpath()
+        cab_pad_x = int(math.ceil(64.0 * sc))
+        cab_pad_top = int(math.ceil(roof_h + 26.0 * sc))
+        cab_pad_bot = int(math.ceil(28.0 * sc))
+        cab_img_w = max(64, int(math.ceil(cab_w + cab_pad_x * 2)))
+        cab_img_h = max(64, int(math.ceil(cab_h + cab_pad_top + cab_pad_bot)))
+        cab_ox = cab_l - cab_pad_x
+        cab_oy = cab_t - cab_pad_top
+        cabin_key = (cab_img_w, cab_img_h, round(sc, 2), round(light_w * 5.0), round(rain_amt * 3.0), round(roof_snow * 5.0))
+        cabin_cache = getattr(AtmosphericScenePainter, "_cabin_cache", None)
+        if cabin_cache is None or cabin_cache[0] != cabin_key:
+            cab_img = QImage(cab_img_w, cab_img_h, QImage.Format.Format_ARGB32_Premultiplied)
+            cab_img.fill(0)
+            cp = QPainter(cab_img)
+            cp.setRenderHint(QPainter.RenderHint.Antialiasing)
+            cp.translate(-cab_ox, -cab_oy)
 
-            sg_r = QLinearGradient(QPointF(hx, cab_t - roof_h - 6.0 * sc), QPointF(hx, cab_t + 22.0 * sc))
-            sg_r.setColorAt(0.0, QColor(253, 254, 255, sn_alpha))
-            sg_r.setColorAt(0.72, QColor(232, 242, 254, sn_alpha))
-            sg_r.setColorAt(1.0, QColor(194, 212, 236, sn_alpha))
-            p.setPen(QPen(QColor(255, 255, 255, int(sn_alpha * 0.6)), 0.9))
-            p.setBrush(sg_r)
-            p.drawPath(sn_roof)
+            cp.setPen(QPen(QColor(38, 42, 50), 1.2))
+            cp.setBrush(QColor(84, 88, 98))
+            cp.drawRoundedRect(QRectF(ch_x, ch_top, ch_w, 58.0 * sc), 2.0, 2.0)
+            cp.setPen(QPen(QColor(52, 56, 66, 180), 1.0))
+            for br_y in range(1, 5):
+                yy = ch_top + br_y * 10.0 * sc
+                cp.drawLine(QPointF(ch_x + 1.0, yy), QPointF(ch_x + ch_w - 1.0, yy))
+            cp.setPen(QPen(QColor(38, 42, 50), 1.2))
+            cp.setBrush(QColor(102, 106, 118))
+            cp.drawRoundedRect(QRectF(ch_x - 3.5 * sc, ch_top - 4.5 * sc, ch_w + 7.0 * sc, 7.0 * sc), 2.0, 2.0)
 
-            # Snow cap on chimney top + window sill + subtle icicles under eaves
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(246, 251, 255, sn_alpha))
-            p.drawRoundedRect(QRectF(ch_x - 4.0 * sc, ch_top - 8.0 * sc, ch_w + 8.0 * sc, 5.5 * sc), 2.5, 2.5)
-            p.drawRoundedRect(QRectF(win_x - 4.0 * sc, win_y + win_h - 3.5 * sc, win_w + 8.0 * sc, 5.5 * sc), 2.5, 2.5)
-            p.setBrush(QColor(210, 232, 255, int(round(sn_alpha * 0.78))))
-            for ic in range(5):
-                ix = cab_l - overhang + (cab_w + overhang * 2.0) * (0.08 + ic * 0.21)
-                ih_ic = (5.0 + (ic % 3) * 3.0) * sc * min(1.0, roof_snow * 1.4)
-                ic_p = QPainterPath()
-                ic_p.moveTo(ix - 1.6 * sc, cab_t + 14.0 * sc)
-                ic_p.lineTo(ix + 1.6 * sc, cab_t + 14.0 * sc)
-                ic_p.lineTo(ix, cab_t + 14.0 * sc + ih_ic)
-                ic_p.closeSubpath()
-                p.drawPath(ic_p)
-        p.restore()
+            cp.setPen(QPen(QColor(42, 46, 54), 1.2))
+            cp.setBrush(QColor(74, 78, 88))
+            cp.drawRoundedRect(QRectF(cab_l - 4.0 * sc, hy - 10.0 * sc, cab_w + 8.0 * sc, 13.0 * sc), 2.0, 2.0)
+
+            n_logs = 10
+            log_h = (cab_h - 8.0 * sc) / float(n_logs)
+            wet_dim = 1.0 - 0.12 * rain_amt
+            for li in range(n_logs):
+                ly = cab_t + li * log_h
+                shade = ((li * 29) % 5) * 4
+                lg = QLinearGradient(QPointF(cab_l, ly), QPointF(cab_l, ly + log_h))
+                lg.setColorAt(0.0, QColor(int((156 - shade) * wet_dim), int((100 - shade) * wet_dim), int((58 - shade // 2) * wet_dim)))
+                lg.setColorAt(0.45, QColor(int((126 - shade) * wet_dim), int((76 - shade) * wet_dim), int((42 - shade // 2) * wet_dim)))
+                lg.setColorAt(1.0, QColor(int((76 - shade) * wet_dim), int((44 - shade // 2) * wet_dim), int((24 - shade // 3) * wet_dim)))
+                cp.setPen(QPen(QColor(46, 26, 14, 235), max(1.2, 1.4 * sc)))
+                cp.setBrush(lg)
+                cp.drawRoundedRect(QRectF(cab_l - 11.0 * sc, ly, cab_w + 22.0 * sc, log_h + 0.5), log_h * 0.38, log_h * 0.38)
+                cp.setPen(QPen(QColor(58, 34, 18, 115), 0.9))
+                g_off = ((li * 19) % 24) * sc
+                cp.drawLine(QPointF(cab_l + 8.0 * sc + g_off, ly + log_h * 0.35), QPointF(cab_l + cab_w * 0.48 + g_off, ly + log_h * 0.35))
+                cp.drawLine(QPointF(cab_l + cab_w * 0.55 - g_off * 0.5, ly + log_h * 0.68), QPointF(cab_l + cab_w - 10.0 * sc, ly + log_h * 0.68))
+                cp.setPen(QPen(QColor(56, 32, 18, 190), 1.0))
+                cp.setBrush(QColor(174, 120, 74, 210))
+                cp.drawEllipse(QRectF(cab_l - 11.0 * sc, ly + 1.0, log_h * 0.72, log_h - 2.0))
+                cp.drawEllipse(QRectF(cab_l + cab_w + 11.0 * sc - log_h * 0.72, ly + 1.0, log_h * 0.72, log_h - 2.0))
+
+            gable = QPainterPath()
+            gable.moveTo(cab_l + 4.0 * sc, cab_t + 2.0)
+            gable.lineTo(hx, cab_t - roof_h + 6.0 * sc)
+            gable.lineTo(cab_l + cab_w - 4.0 * sc, cab_t + 2.0)
+            gable.closeSubpath()
+            cp.setPen(QPen(QColor(58, 34, 18), 1.2))
+            cp.setBrush(QColor(int(116 * wet_dim), int(70 * wet_dim), int(38 * wet_dim)))
+            cp.drawPath(gable)
+
+            door_w = 38.0 * sc
+            door_h = 74.0 * sc
+            door_x = hx - cab_w * 0.22 - door_w * 0.5
+            door_y = hy - door_h - 4.0 * sc
+            cp.setPen(QPen(QColor(38, 24, 15), max(1.5, 2.0 * sc)))
+            cp.setBrush(QColor(68, 42, 26))
+            cp.drawRoundedRect(QRectF(door_x, door_y, door_w, door_h), 3.0 * sc, 3.0 * sc)
+            cp.setPen(QPen(QColor(40, 24, 14, 170), 1.0))
+            cp.drawLine(QPointF(door_x + door_w * 0.33, door_y + 2.0), QPointF(door_x + door_w * 0.33, door_y + door_h - 2.0))
+            cp.drawLine(QPointF(door_x + door_w * 0.66, door_y + 2.0), QPointF(door_x + door_w * 0.66, door_y + door_h - 2.0))
+            cp.setPen(Qt.PenStyle.NoPen)
+            cp.setBrush(QColor(190, 165, 110))
+            cp.drawEllipse(QPointF(door_x + door_w - 6.5 * sc, door_y + door_h * 0.54), 2.4 * sc, 2.4 * sc)
+
+            win_w = 46.0 * sc
+            win_h = 42.0 * sc
+            win_x = hx + cab_w * 0.18 - win_w * 0.5
+            win_y = cab_t + 44.0 * sc
+            attic_r = 14.0 * sc
+            attic_y = cab_t - roof_h * 0.36
+
+            if light_w > 0.08:
+                w_glow = _get_glow_disc_img((255, 196, 88), int(round(145 * light_w)), 64)
+                gs = 110.0 * sc
+                cp.drawImage(QRectF(win_x + win_w * 0.5 - gs * 0.5, win_y + win_h * 0.5 - gs * 0.5, gs, gs), w_glow)
+                cp.drawImage(QRectF(hx - gs * 0.35, attic_y - gs * 0.35, gs * 0.7, gs * 0.7), w_glow)
+                lan_x, lan_y = door_x + door_w + 10.0 * sc, door_y + 14.0 * sc
+                cp.drawImage(QRectF(lan_x - 24.0 * sc, lan_y - 24.0 * sc, 48.0 * sc, 48.0 * sc), w_glow)
+                cp.setBrush(QColor(255, 224, 130, int(round(235 * light_w))))
+                cp.drawEllipse(QPointF(lan_x, lan_y), 3.6 * sc, 4.5 * sc)
+
+            day_glass = QColor(72, 108, 138, 220)
+            night_glass = QColor(255, 206, 98, 248)
+            wg = QColor(
+                int(round(day_glass.red() * (1.0 - light_w) + night_glass.red() * light_w)),
+                int(round(day_glass.green() * (1.0 - light_w) + night_glass.green() * light_w)),
+                int(round(day_glass.blue() * (1.0 - light_w) + night_glass.blue() * light_w)),
+                int(round(day_glass.alpha() * (1.0 - light_w) + night_glass.alpha() * light_w)),
+            )
+            cp.setPen(QPen(QColor(44, 28, 18), max(2.0, 3.0 * sc)))
+            cp.setBrush(wg)
+            cp.drawRoundedRect(QRectF(win_x, win_y, win_w, win_h), 3.0 * sc, 3.0 * sc)
+            cp.setPen(QPen(QColor(52, 34, 22), max(1.5, 2.2 * sc)))
+            cp.drawLine(QPointF(win_x + win_w * 0.5, win_y), QPointF(win_x + win_w * 0.5, win_y + win_h))
+            cp.drawLine(QPointF(win_x, win_y + win_h * 0.5), QPointF(win_x + win_w, win_y + win_h * 0.5))
+            cp.setBrush(QColor(72, 46, 28))
+            cp.drawRoundedRect(QRectF(win_x - 4.0 * sc, win_y + win_h, win_w + 8.0 * sc, 5.5 * sc), 2.0, 2.0)
+
+            cp.setPen(QPen(QColor(44, 28, 18), max(1.8, 2.4 * sc)))
+            cp.setBrush(wg)
+            cp.drawEllipse(QPointF(hx, attic_y), attic_r, attic_r)
+            cp.drawLine(QPointF(hx - attic_r, attic_y), QPointF(hx + attic_r, attic_y))
+            cp.drawLine(QPointF(hx, attic_y - attic_r), QPointF(hx, attic_y + attic_r))
+
+            overhang = 22.0 * sc
+            roof_p = QPainterPath()
+            roof_p.moveTo(hx, cab_t - roof_h - 4.0 * sc)
+            roof_p.lineTo(cab_l + cab_w + overhang, cab_t + 8.0 * sc)
+            roof_p.lineTo(cab_l + cab_w + overhang - 6.0 * sc, cab_t + 16.0 * sc)
+            roof_p.lineTo(hx, cab_t - roof_h + 7.0 * sc)
+            roof_p.lineTo(cab_l - overhang + 6.0 * sc, cab_t + 16.0 * sc)
+            roof_p.lineTo(cab_l - overhang, cab_t + 8.0 * sc)
+            roof_p.closeSubpath()
+            rg = QLinearGradient(QPointF(hx, cab_t - roof_h), QPointF(hx, cab_t + 14.0 * sc))
+            rg.setColorAt(0.0, QColor(int(76 * wet_dim), int(48 * wet_dim), int(34 * wet_dim)))
+            rg.setColorAt(1.0, QColor(int(48 * wet_dim), int(30 * wet_dim), int(22 * wet_dim)))
+            cp.setPen(QPen(QColor(30, 18, 12), 1.4))
+            cp.setBrush(rg)
+            cp.drawPath(roof_p)
+            cp.save()
+            cp.setClipPath(roof_p)
+            cp.setPen(QPen(QColor(32, 18, 10, 140), 1.0))
+            for sr in range(1, 6):
+                ry = (cab_t - roof_h) + sr * (roof_h / 5.5)
+                cp.drawLine(QPointF(cab_l - overhang, ry), QPointF(cab_l + cab_w + overhang, ry))
+            cp.restore()
+
+            if roof_snow > 0.04:
+                sn_alpha = int(round(242 * min(1.0, roof_snow * 1.45)))
+                sn_thick = (5.0 + 13.0 * roof_snow) * sc
+                sn_roof = QPainterPath()
+                sn_roof.moveTo(hx, cab_t - roof_h - 6.0 * sc)
+                sn_roof.lineTo(cab_l + cab_w + overhang + 2.0 * sc, cab_t + 7.0 * sc)
+                for k_s in range(6, -1, -1):
+                    u_s = k_s / 6.0
+                    sx_e = hx + (cab_l + cab_w + overhang - hx) * u_s
+                    sy_e = (cab_t - roof_h - 4.0 * sc) + (roof_h + 12.0 * sc) * u_s
+                    bulge = sn_thick * (0.45 + 0.55 * (u_s ** 0.7)) * (0.85 + 0.25 * math.sin(u_s * 12.5))
+                    sn_roof.lineTo(sx_e, sy_e + bulge)
+                for k_s in range(1, 7):
+                    u_s = k_s / 6.0
+                    sx_e = hx - (hx - (cab_l - overhang)) * u_s
+                    sy_e = (cab_t - roof_h - 4.0 * sc) + (roof_h + 12.0 * sc) * u_s
+                    bulge = sn_thick * (0.45 + 0.55 * (u_s ** 0.7)) * (0.85 + 0.25 * math.cos(u_s * 11.0))
+                    sn_roof.lineTo(sx_e, sy_e + bulge)
+                sn_roof.lineTo(cab_l - overhang - 2.0 * sc, cab_t + 7.0 * sc)
+                sn_roof.closeSubpath()
+
+                sg_r = QLinearGradient(QPointF(hx, cab_t - roof_h - 6.0 * sc), QPointF(hx, cab_t + 22.0 * sc))
+                sg_r.setColorAt(0.0, QColor(253, 254, 255, sn_alpha))
+                sg_r.setColorAt(0.72, QColor(232, 242, 254, sn_alpha))
+                sg_r.setColorAt(1.0, QColor(194, 212, 236, sn_alpha))
+                cp.setPen(QPen(QColor(255, 255, 255, int(sn_alpha * 0.6)), 0.9))
+                cp.setBrush(sg_r)
+                cp.drawPath(sn_roof)
+
+                cp.setPen(Qt.PenStyle.NoPen)
+                cp.setBrush(QColor(246, 251, 255, sn_alpha))
+                cp.drawRoundedRect(QRectF(ch_x - 4.0 * sc, ch_top - 8.0 * sc, ch_w + 8.0 * sc, 5.5 * sc), 2.5, 2.5)
+                cp.drawRoundedRect(QRectF(win_x - 4.0 * sc, win_y + win_h - 3.5 * sc, win_w + 8.0 * sc, 5.5 * sc), 2.5, 2.5)
+                cp.setBrush(QColor(210, 232, 255, int(round(sn_alpha * 0.78))))
+                for ic in range(5):
+                    ix = cab_l - overhang + (cab_w + overhang * 2.0) * (0.08 + ic * 0.21)
+                    ih_ic = (5.0 + (ic % 3) * 3.0) * sc * min(1.0, roof_snow * 1.4)
+                    ic_p = QPainterPath()
+                    ic_p.moveTo(ix - 1.6 * sc, cab_t + 14.0 * sc)
+                    ic_p.lineTo(ix + 1.6 * sc, cab_t + 14.0 * sc)
+                    ic_p.lineTo(ix, cab_t + 14.0 * sc + ih_ic)
+                    ic_p.closeSubpath()
+                    cp.drawPath(ic_p)
+            cp.end()
+            cabin_cache = (cabin_key, cab_img)
+            AtmosphericScenePainter._cabin_cache = cabin_cache
+
+        p.drawImage(QPointF(cab_ox, cab_oy), cabin_cache[1])
 
         # Lush 2D layered deciduous trees with sculpted cloud-foliage crowns & gentle wind sway (zero polka-dot loops)
         leafy_vis = max(0.0, 1.0 - max(snow_amt, tree_vis if snow_amt > 0.1 else 0.0))
@@ -4644,13 +4642,17 @@ class AtmosphericScenePainter:
                 # Bottom strand
                 [(tx - 96 * sc, by - 36 * sc, (56, 189, 248)), (tx - 48 * sc, by - 22 * sc, (244, 114, 182)), (tx, by - 18 * sc, (255, 215, 90)), (tx + 48 * sc, by - 22 * sc, (248, 113, 113)), (tx + 96 * sc, by - 36 * sc, (52, 211, 153))],
             ]
+            def _pine_dx(yv: float) -> float:
+                return pine_lean * max(0.0, min(1.04, (by - yv) / max(1.0, 260.0 * sc)))
+
             bulb_idx = 0
             for strand in strand_bulbs:
+                shifted_strand = [(bx_s + _pine_dx(by_s), by_s, rgb_s) for bx_s, by_s, rgb_s in strand]
                 p.setPen(QPen(QColor(22, 42, 32, 200), max(1.2, 1.8 * sc)))
-                for si in range(len(strand) - 1):
-                    p.drawLine(QPointF(strand[si][0], strand[si][1]), QPointF(strand[si + 1][0], strand[si + 1][1]))
+                for si in range(len(shifted_strand) - 1):
+                    p.drawLine(QPointF(shifted_strand[si][0], shifted_strand[si][1]), QPointF(shifted_strand[si + 1][0], shifted_strand[si + 1][1]))
                 p.setPen(Qt.PenStyle.NoPen)
-                for bx, by_b, rgb in strand:
+                for bx, by_b, rgb in shifted_strand:
                     tw = 0.50 + 0.50 * math.sin(phase_t * 3.8 + bulb_idx * 1.1)
                     b_glow = _get_glow_disc_img(rgb, int(round(95 + 115 * tw)), 24)
                     gs = 24.0 * sc
@@ -4661,7 +4663,7 @@ class AtmosphericScenePainter:
                     p.drawEllipse(QPointF(bx - 1.1 * sc, by_b - 1.1 * sc), 1.3 * sc, 1.3 * sc)
                     bulb_idx += 1
 
-            # Glossy ornaments
+            # Glossy ornaments (swaying together with the pine boughs)
             ornaments = [
                 (tx - 18 * sc, by - 208 * sc, QColor(239, 68, 68)),
                 (tx + 24 * sc, by - 160 * sc, QColor(250, 204, 21)),
@@ -4671,7 +4673,8 @@ class AtmosphericScenePainter:
                 (tx + 58 * sc, by - 56 * sc, QColor(239, 68, 68)),
                 (tx - 16 * sc, by - 46 * sc, QColor(56, 189, 248)),
             ]
-            for ox, oy, ocol in ornaments:
+            for ox_raw, oy, ocol in ornaments:
+                ox = ox_raw + _pine_dx(oy)
                 r_o = 5.6 * sc
                 p.setPen(QPen(ocol.darker(145), 1.0))
                 p.setBrush(ocol)
@@ -4680,17 +4683,18 @@ class AtmosphericScenePainter:
                 p.setBrush(QColor(255, 255, 255, 165))
                 p.drawEllipse(QPointF(ox - r_o * 0.32, oy - r_o * 0.32), r_o * 0.28, r_o * 0.28)
 
-            # Radiant golden star on top
+            # Radiant golden star on top (swaying in lockstep with the tree apex)
             star_y = by - 280.0 * sc
+            star_x = tx + _pine_dx(star_y)
             star_tw = 0.72 + 0.28 * math.sin(phase_t * 2.8)
             s_glow = _get_glow_disc_img((255, 232, 115), int(round(145 * star_tw)), 40)
             s_sz = 46.0 * sc
-            p.drawImage(QRectF(tx - s_sz * 0.5, star_y - s_sz * 0.5, s_sz, s_sz), s_glow)
+            p.drawImage(QRectF(star_x - s_sz * 0.5, star_y - s_sz * 0.5, s_sz, s_sz), s_glow)
             star_p = QPainterPath()
             for k in range(10):
                 ang = -math.pi * 0.5 + k * (math.pi / 5.0)
                 rad = (15.5 if k % 2 == 0 else 6.8) * sc
-                pt = QPointF(tx + math.cos(ang) * rad, star_y + math.sin(ang) * rad)
+                pt = QPointF(star_x + math.cos(ang) * rad, star_y + math.sin(ang) * rad)
                 if k == 0:
                     star_p.moveTo(pt)
                 else:
