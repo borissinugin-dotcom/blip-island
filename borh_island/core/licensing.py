@@ -15,7 +15,7 @@ from pathlib import Path
 from borh_island.core.security import decrypt_secret, encrypt_secret
 
 APP_PRODUCT_NAME = "Blip"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 WORKER_BASE_URL = "https://blip-license-worker.blip-borh.workers.dev"
 ED25519_PUBLIC_KEY_B64U = "lue3Ld1hP5dYrUlXjrDRxmv6UWKl_vKAOjzmHKWJH8w"
 
@@ -733,8 +733,7 @@ class LicenseManager:
 
     def create_payment_order(self, worker_url: str = WORKER_BASE_URL) -> tuple[bool, dict]:
         try:
-            is_master = bool(self.get_status().is_master)
-            target_sum = 100 if is_master else 300
+            target_sum = 300
             status_code, data = _worker_request(
                 "POST",
                 f"{worker_url.rstrip('/')}/order/create",
@@ -743,7 +742,6 @@ class LicenseManager:
                     "tier": "pro",
                     "plan": "3m",
                     "duration_days": 90,
-                    "is_master": is_master,
                     "amount_rub": target_sum,
                 },
                 timeout=12.0,

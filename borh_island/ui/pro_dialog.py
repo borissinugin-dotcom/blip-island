@@ -172,10 +172,9 @@ class BlipProWidget(QWidget):
         self.title_lbl.setText(tier_txt)
 
         is_master = bool(getattr(st, "is_master", False))
-        price_rub = 100 if is_master else 300
+        price_rub = 300
         self.perks_lbl.setText(
-            f"Стоимость Blip PRO: {price_rub} ₽ за 3 месяца"
-            f"{' (тариф Master BORh)' if is_master else ''}.\n"
+            f"Стоимость Blip PRO: {price_rub} ₽ за 3 месяца.\n"
             "Подписка PRO открывает:\n"
             "• Стекло Liquid Glass и Frost Glass\n"
             "• Погоду фона в реальном времени\n"
