@@ -1492,8 +1492,37 @@ def compute_blade_joints(
     return joints
 
 
+def _meadow_crest_y(x: float, cx0: float, turf_y: float, sc: float) -> float:
+    """Return elevated 3D hillside ridge Y (z=1.0), sloping diagonally & organically across full world width."""
+    ux = (x - cx0) / 660.0
+    hill_tilt = 34.0 * math.atan(ux * 1.22) * 0.85
+    swell = math.sin(ux * 3.8 + 0.42) * 7.2 + math.cos(ux * 7.6 - 0.55) * 2.6
+    return turf_y - (88.0 - hill_tilt + swell) * sc
+
+
+def _meadow_surface_y(x: float, z: float, cx0: float, turf_y: float, sc: float) -> float:
+    """Project (x, depth z in 0..1) onto the convex 3D sloped meadow surface."""
+    ux = (x - cx0) / 660.0
+    zf = 0.0 if z < 0.0 else (1.0 if z > 1.0 else z)
+    zp = zf * (1.38 - 0.38 * zf)
+    y_front = turf_y + (9.5 + 7.0 * math.atan(ux * 1.15) + math.sin(ux * 5.1) * 2.0) * sc
+    y_back = _meadow_crest_y(x, cx0, turf_y, sc)
+    camber = math.sin(zf * math.pi) * (8.5 + 3.2 * math.cos(ux * 4.4)) * sc
+    return y_front + (y_back - y_front) * zp - camber
+
+
+def _meadow_slope_lean(x: float, z: float, cx0: float, turf_y: float, sc: float) -> float:
+    """Compute natural 3D hillside lean + camera perspective splay angle (radians) for grass at (x, z)."""
+    y_l = _meadow_surface_y(x - 16.0, z, cx0, turf_y, sc)
+    y_r = _meadow_surface_y(x + 16.0, z, cx0, turf_y, sc)
+    dy_dx = (y_r - y_l) / 32.0
+    ux = max(-1.1, min(1.1, (x - cx0) / 660.0))
+    # Combine downhill gravitational/breeze tilt along the 3D grade + subtle wide-angle perspective splay
+    return max(-0.42, min(0.46, dy_dx * 1.35 + 0.11 * (1.0 - 0.35 * z) + ux * 0.08 * (1.0 - 0.65 * z)))
+
+
 class GrassSkeletonSim:
-    """Stateful per-blade damped spring-damper skeletal simulation (randomized varied heights, reseeded invisibly on open)."""
+    """Stateful per-blade damped spring-damper skeletal simulation across 3D sloped meadow & off-screen reserve."""
 
     __slots__ = (
         "n_blades",
@@ -1509,6 +1538,7 @@ class GrassSkeletonSim:
         "w_scales",
         "shade_indices",
         "bias_rads",
+        "z_depths",
         "_last_ts",
         "_prev_cx",
         "_prev_cy",
@@ -1516,8 +1546,13 @@ class GrassSkeletonSim:
         "_cursor_vx",
         "_settling",
         "_canopy_img",
+        "_canopy_back_img",
         "_canopy_key",
         "_canopy_phase",
+        "_geom_cache",
+        "_cached_states",
+        "_cached_states_key",
+        "_pending_front",
     )
 
     def __init__(self) -> None:
@@ -1534,6 +1569,7 @@ class GrassSkeletonSim:
         self.w_scales: list[float] = []
         self.shade_indices: list[int] = []
         self.bias_rads: list[float] = []
+        self.z_depths: list[float] = []
         self._last_ts = 0.0
         self._prev_cx = -999.0
         self._prev_cy = -999.0
@@ -1541,26 +1577,40 @@ class GrassSkeletonSim:
         self._cursor_vx = 0.0
         self._settling = False
         self._canopy_img: QImage | None = None
+        self._canopy_back_img: QImage | None = None
         self._canopy_key: tuple | None = None
         self._canopy_phase: float = -1e9
+        self._geom_cache: tuple | None = None
+        self._cached_states: list[tuple[float, float, float, float]] | None = None
+        self._cached_states_key: tuple | None = None
+        self._pending_front: tuple | None = None
 
     @staticmethod
-    def _sample_blade_traits(rng: random.Random, idx: int, px_cm: float) -> tuple[float, float, float, int, float]:
-        """Generate random blade length (0.85cm..6.92cm, always < 7cm max edge), jitter, width, tone, bias."""
+    def _sample_blade_traits(rng: random.Random, idx: int, px_cm: float) -> tuple[float, float, float, int, float, float]:
+        """Generate blade length, jitter, width, tone, rest bias, and stratified 3D hillside depth z in [0..0.90]."""
         tier = rng.random()
-        if tier < 0.35:
-            cm_len = rng.uniform(0.85, 2.35)
-        elif tier < 0.76:
-            cm_len = rng.uniform(2.35, 4.75)
+        if tier < 0.32:
+            cm_len = rng.uniform(1.05, 2.25)
+        elif tier < 0.74:
+            cm_len = rng.uniform(2.25, 3.75)
         else:
-            # Tall meadow stalks capped cleanly in 4.85..6.92 cm (< 7.0 cm ceiling)
-            cm_len = rng.uniform(4.85, 6.92)
-        bh = max(16.0, min(px_cm * 6.95, cm_len * px_cm))
-        x_jit = rng.uniform(-3.1, 3.1)
-        w_sc = rng.uniform(0.60, 1.32) if cm_len > 1.4 else rng.uniform(0.55, 1.05)
-        shade_i = (idx + rng.randint(0, 5)) % 6
-        bias = rng.uniform(-0.14, 0.14)
-        return bh, x_jit, w_sc, shade_i, bias
+            cm_len = rng.uniform(3.75, 4.95)
+        bh = max(18.0, min(px_cm * 5.10, cm_len * px_cm))
+        x_jit = rng.uniform(-3.6, 3.6)
+        w_sc = rng.uniform(0.76, 1.42) if cm_len > 1.5 else rng.uniform(0.64, 1.14)
+        # Lush foreground rim (50% in z=0..0.20) + mid hillside (30% in 0.20..0.56) + upper slope (20% in 0.56..0.90)
+        z_slot = idx % 10
+        if z_slot < 2:
+            z_d = rng.uniform(0.56, 0.90)
+            shade_i = rng.randint(0, 2)
+        elif z_slot < 5:
+            z_d = rng.uniform(0.20, 0.56)
+            shade_i = rng.randint(1, 4)
+        else:
+            z_d = rng.uniform(0.00, 0.20)
+            shade_i = rng.randint(3, 5)
+        bias = rng.uniform(-0.13, 0.13)
+        return bh, x_jit, w_sc, shade_i, bias, z_d
 
     def reseed(self) -> None:
         """Silently regenerate randomized grass heights & organic layout for the next island open."""
@@ -1577,14 +1627,20 @@ class GrassSkeletonSim:
         self.w_scales.clear()
         self.shade_indices.clear()
         self.bias_rads.clear()
+        self.z_depths.clear()
         self._prev_cx = -999.0
         self._prev_cy = -999.0
         self._has_prev_cx = False
         self._cursor_vx = 0.0
         self._settling = False
         self._canopy_img = None
+        self._canopy_back_img = None
         self._canopy_key = None
         self._canopy_phase = -1e9
+        self._geom_cache = None
+        self._cached_states = None
+        self._cached_states_key = None
+        self._pending_front = None
 
     def ensure_blades(self, count: int) -> None:
         if count == self.n_blades:
@@ -1599,13 +1655,15 @@ class GrassSkeletonSim:
             self.w_scales = []
             self.shade_indices = []
             self.bias_rads = []
+            self.z_depths = []
             for i in range(count):
-                bh, xj, ws, sh, br = self._sample_blade_traits(rng, i, px_cm)
+                bh, xj, ws, sh, br, zd = self._sample_blade_traits(rng, i, px_cm)
                 self.heights.append(bh)
                 self.x_jits.append(xj)
                 self.w_scales.append(ws)
                 self.shade_indices.append(sh)
                 self.bias_rads.append(br)
+                self.z_depths.append(zd)
             self.angles = list(self.bias_rads)
             self.ang_vels = [0.0] * count
             self.curls = [b * 0.35 for b in self.bias_rads]
@@ -1627,13 +1685,15 @@ class GrassSkeletonSim:
         self.w_scales = self.w_scales[:keep]
         self.shade_indices = self.shade_indices[:keep]
         self.bias_rads = self.bias_rads[:keep]
+        self.z_depths = self.z_depths[:keep]
         for i in range(keep, count):
-            bh, xj, ws, sh, br = self._sample_blade_traits(rng, i, px_cm)
+            bh, xj, ws, sh, br, zd = self._sample_blade_traits(rng, i, px_cm)
             self.heights.append(bh)
             self.x_jits.append(xj)
             self.w_scales.append(ws)
             self.shade_indices.append(sh)
             self.bias_rads.append(br)
+            self.z_depths.append(zd)
             self.angles.append(br)
             self.ang_vels.append(0.0)
             self.curls.append(br * 0.35)
@@ -1659,8 +1719,11 @@ class GrassSkeletonSim:
         music_energy: float,
         music_bands: list[float] | None,
         dt: float | None = None,
+        *,
+        vis_range: tuple[float, float] | None = None,
+        blade_root_ys: list[float] | None = None,
     ) -> list[tuple[float, float, float, float]]:
-        """Advance spring physics for all blades and return [(bx, bh, angle, curl), ...]."""
+        """Advance spring physics for blades (skipping idle/offscreen springs) and return [(bx, bh, angle, curl), ...]."""
         self.ensure_blades(n_blades)
         now_ts = time.monotonic()
         if dt is None:
@@ -1675,7 +1738,6 @@ class GrassSkeletonSim:
         if has_cursor and cursor_local is not None and vert_inf > 0.02:
             if self._has_prev_cx:
                 raw_dx = float(cursor_local.x()) - self._prev_cx
-                # Clamp single-frame jump so fast swipe momentum stays smooth & bounded
                 clamped_dx = max(-85.0, min(85.0, raw_dx))
                 inst_vx = max(-680.0, min(680.0, clamped_dx / max(0.014, dt_eff)))
                 self._cursor_vx = self._cursor_vx * 0.72 + inst_vx * 0.28
@@ -1689,26 +1751,31 @@ class GrassSkeletonSim:
             self._has_prev_cx = False
             self._cursor_vx *= 0.80
 
-        wind_rad_amp = 0.088 if wet else 0.056
+        wind_rad_amp = 0.095 if wet else 0.062
         has_music = music_energy > 0.02
         n_mb = len(music_bands) if music_bands else 0
-        part_radius = 48.0
+        part_radius = 52.0
         sub_dt = dt_eff * 0.5
         any_moving = False
         out: list[tuple[float, float, float, float]] = []
         append_out = out.append
 
-        cx_val = float(cursor_local.x()) if cursor_local is not None else -999.0
-        cy_val = float(cursor_local.y()) if cursor_local is not None else -999.0
+        cx_val = float(cursor_local.x()) if cursor_local is not None else -9999.0
+        cy_val = float(cursor_local.y()) if cursor_local is not None else -9999.0
         cursor_active = bool(has_cursor and vert_inf > 0.02 and cursor_local is not None)
         seg_min = min(prev_cx, cx_val) if (cursor_active and has_prev and abs(cx_val - prev_cx) <= 130.0) else cx_val
         seg_max = max(prev_cx, cx_val) if (cursor_active and has_prev and abs(cx_val - prev_cx) <= 130.0) else cx_val
+        has_vis = vis_range is not None
+        vis_x0 = vis_range[0] if vis_range is not None else -1e9
+        vis_x1 = vis_range[1] if vis_range is not None else 1e9
+        has_b_roots = blade_root_ys is not None and len(blade_root_ys) >= n_blades
 
         m_sin = math.sin
         m_cos = math.cos
-        max_h_cap = _px_per_cm() * 6.98
+        max_h_cap = _px_per_cm() * 5.40
         wet_h_mult = 1.06 if wet else 1.0
-        wind_freq = 2.05 if wet else 1.32
+        wind_freq = 2.05 if wet else 1.35
+        phase_wind_base = phase_t * wind_freq
         ease_r = min(1.0, dt_eff * 5.8)
         follow = min(1.0, dt_eff * 24.0)
         angles = self.angles
@@ -1721,21 +1788,34 @@ class GrassSkeletonSim:
         heights = self.heights
         x_jits = self.x_jits
         bias_rads = self.bias_rads
+        z_depths = self.z_depths
+        inv_n = 1.0 / max(1, n_blades)
+        swipe_base = max(-0.28, min(0.28, self._cursor_vx / 1350.0))
 
         for i in range(n_blades):
-            frac = (i + 0.5) / n_blades
+            frac = (i + 0.5) * inv_n
             bx = eff_left + frac * eff_width + x_jits[i]
+            bias_rad = bias_rads[i]
+
+            # Fast cull for off-screen reserve blades that are already at rest
+            if has_vis and (bx < vis_x0 or bx > vis_x1) and sides[i] == 0.0 and abs(angles[i] - bias_rad) < 0.12 and abs(ang_vels[i]) < 0.05:
+                append_out((bx, heights[i] * wet_h_mult, bias_rad, bias_rad * 0.35))
+                continue
+
+            zd = z_depths[i]
+            # Travelling 3D hillside wind wave propagating across x and up depth z
+            w_phase = phase_wind_base - bx * 0.011 - zd * 2.5 + i * 0.37
             if has_music:
                 band_v = float(music_bands[min(n_mb - 1, int(frac * n_mb))]) if n_mb > 0 else music_energy
                 bh = min(max_h_cap, heights[i] * wet_h_mult * (1.0 + 0.10 * music_energy + 0.16 * band_v))
                 wind_rad = (
-                    m_sin(phase_t * wind_freq + i * 0.43) * wind_rad_amp
+                    m_sin(w_phase) * wind_rad_amp
                     + m_sin(phase_t * 3.8 + i * 0.55) * (0.036 + 0.09 * band_v + 0.048 * music_energy)
                 )
             else:
                 bh = min(max_h_cap, heights[i] * wet_h_mult)
-                wind_rad = m_sin(phase_t * wind_freq + i * 0.43) * wind_rad_amp
-            bias_rad = bias_rads[i]
+                wind_rad = m_sin(w_phase) * wind_rad_amp
+
             rest_angle = bias_rad + wind_rad
             rest_curl = wind_rad * 0.55 + bias_rad * 0.35
 
@@ -1743,8 +1823,6 @@ class GrassSkeletonSim:
             avel = ang_vels[i]
             crl = curls[i]
             cvel = curl_vels[i]
-            t_ang = target_angles[i]
-            t_crl = target_curls[i]
             pushed = False
 
             if cursor_active:
@@ -1754,53 +1832,102 @@ class GrassSkeletonSim:
                     adx = bx - seg_max
                 else:
                     adx = 0.0
-                dx = bx - cx_val
 
                 if adx < part_radius:
-                    pushed = True
-                    side = sides[i]
-                    if side == 0.0:
-                        if abs(ang - rest_angle) > 0.07:
-                            side = 1.0 if (ang - rest_angle) > 0.0 else -1.0
-                        elif abs(self._cursor_vx) > 65.0:
-                            side = 1.0 if self._cursor_vx > 0.0 else -1.0
-                        elif abs(dx) > 4.0:
-                            side = 1.0 if dx > 0.0 else -1.0
-                        else:
-                            side = 1.0 if (i % 2 == 0) else -1.0
-                        sides[i] = side
-                    bell = 0.5 * (1.0 + m_cos(math.pi * adx / part_radius)) * vert_inf
-                    hit_frac = max(0.18, min(1.0, (root_y - cy_val) / max(20.0, bh)))
-                    swipe = max(-0.28, min(0.28, self._cursor_vx / 1350.0)) * bell
-                    goal_ang = rest_angle + side * bell * (1.08 + 0.44 * (1.0 - hit_frac * 0.45)) + swipe
-                    goal_crl = rest_curl + side * bell * (0.54 + 0.54 * hit_frac)
-                    t_ang += (goal_ang - t_ang) * follow
-                    t_crl += (goal_crl - t_crl) * follow
+                    b_ry = blade_root_ys[i] if has_b_roots and blade_root_ys is not None else root_y
+                    p_sc = 1.0 / (1.0 + 1.48 * zd) if has_b_roots else 1.0
+                    eff_bh = bh * p_sc
+                    # 3D depth-aware vertical check so cursor parts grass on the exact slope elevation under mouse
+                    y_ok = (not has_b_roots) or ((b_ry - eff_bh - 22.0) <= cy_val <= (b_ry + 18.0))
+                    if y_ok:
+                        pushed = True
+                        dx = bx - cx_val
+                        side = sides[i]
+                        if side == 0.0:
+                            if abs(ang - rest_angle) > 0.07:
+                                side = 1.0 if (ang - rest_angle) > 0.0 else -1.0
+                            elif abs(self._cursor_vx) > 65.0:
+                                side = 1.0 if self._cursor_vx > 0.0 else -1.0
+                            elif abs(dx) > 4.0:
+                                side = 1.0 if dx > 0.0 else -1.0
+                            else:
+                                side = 1.0 if (i & 1) == 0 else -1.0
+                            sides[i] = side
+                        bell = 0.5 * (1.0 + m_cos(math.pi * adx / part_radius)) * vert_inf
+                        hit_frac = max(0.18, min(1.0, (b_ry - cy_val) / max(18.0, eff_bh)))
+                        swipe = swipe_base * bell
+                        goal_ang = rest_angle + side * bell * (1.08 + 0.44 * (1.0 - hit_frac * 0.45)) + swipe
+                        goal_crl = rest_curl + side * bell * (0.54 + 0.54 * hit_frac)
+                        t_ang = target_angles[i] + (goal_ang - target_angles[i]) * follow
+                        t_crl = target_curls[i] + (goal_crl - target_curls[i]) * follow
+                    else:
+                        t_ang = target_angles[i] + (rest_angle - target_angles[i]) * ease_r
+                        t_crl = target_curls[i] + (rest_curl - target_curls[i]) * ease_r
+                        if abs(ang - rest_angle) < 0.045 and abs(avel) < 0.14:
+                            sides[i] = 0.0
                 else:
                     if abs(ang - rest_angle) < 0.045 and abs(avel) < 0.14:
                         sides[i] = 0.0
-                    t_ang += (rest_angle - t_ang) * ease_r
-                    t_crl += (rest_curl - t_crl) * ease_r
+                    t_ang = target_angles[i] + (rest_angle - target_angles[i]) * ease_r
+                    t_crl = target_curls[i] + (rest_curl - target_curls[i]) * ease_r
             else:
                 if abs(ang - rest_angle) < 0.045 and abs(avel) < 0.14:
                     sides[i] = 0.0
-                t_ang += (rest_angle - t_ang) * ease_r
-                t_crl += (rest_curl - t_crl) * ease_r
+                # Fast path: skip spring integration completely for calm settled blades (~90% of meadow!)
+                if (
+                    sides[i] == 0.0
+                    and abs(ang - rest_angle) < 0.008
+                    and abs(avel) < 0.015
+                    and abs(crl - rest_curl) < 0.008
+                    and abs(cvel) < 0.015
+                ):
+                    angles[i] = rest_angle
+                    curls[i] = rest_curl
+                    target_angles[i] = rest_angle
+                    target_curls[i] = rest_curl
+                    ang_vels[i] = 0.0
+                    curl_vels[i] = 0.0
+                    append_out((bx, bh, rest_angle, rest_curl))
+                    continue
+                t_ang = target_angles[i] + (rest_angle - target_angles[i]) * ease_r
+                t_crl = target_curls[i] + (rest_curl - target_curls[i]) * ease_r
 
-            # Asymmetric critically-damped recovery (fast push response, smooth recovery)
+            # Skip Euler substeps even during cursor hover for distant untouched blades
+            if (
+                not pushed
+                and sides[i] == 0.0
+                and abs(ang - rest_angle) < 0.008
+                and abs(avel) < 0.015
+                and abs(crl - rest_curl) < 0.008
+                and abs(cvel) < 0.015
+            ):
+                angles[i] = rest_angle
+                curls[i] = rest_curl
+                target_angles[i] = rest_angle
+                target_curls[i] = rest_curl
+                ang_vels[i] = 0.0
+                curl_vels[i] = 0.0
+                append_out((bx, bh, rest_angle, rest_curl))
+                continue
+
             k_a = 128.0 if pushed else 28.0
             c_a = 19.5 if pushed else 11.4
             k_c = 138.0 if pushed else 32.0
             c_c = 20.5 if pushed else 12.2
 
-            for _ in range(2):
-                acc = (t_ang - ang) * k_a - avel * c_a
-                avel += acc * sub_dt
-                ang += avel * sub_dt
+            acc = (t_ang - ang) * k_a - avel * c_a
+            avel += acc * sub_dt
+            ang += avel * sub_dt
+            c_acc = (t_crl - crl) * k_c - cvel * c_c
+            cvel += c_acc * sub_dt
+            crl += cvel * sub_dt
 
-                c_acc = (t_crl - crl) * k_c - cvel * c_c
-                cvel += c_acc * sub_dt
-                crl += cvel * sub_dt
+            acc = (t_ang - ang) * k_a - avel * c_a
+            avel += acc * sub_dt
+            ang += avel * sub_dt
+            c_acc = (t_crl - crl) * k_c - cvel * c_c
+            cvel += c_acc * sub_dt
+            crl += cvel * sub_dt
 
             if ang < -1.38:
                 ang = -1.38
@@ -1899,9 +2026,9 @@ class _CloudWisp:
 
 
 class CloudSmokeField:
-    """Volumetric 2x translucent cloud smoke simulation streaming rightward by wind m/s and dispersing around cursor."""
+    """Volumetric translucent cloud smoke simulation streaming by wind m/s and dispersing around moving cursor."""
 
-    _POOL_SIZE = 368
+    _POOL_SIZE = 196
 
     def __init__(self, seed: int = 42) -> None:
         self._rng = random.Random(seed)
@@ -1915,11 +2042,13 @@ class CloudSmokeField:
         self._buf_key: tuple | None = None
         self._buf_u_shift: float = 0.0
         self._buf_ts: float = 0.0
+        self._buf_cur_x: float = -9999.0
+        self._buf_cur_y: float = -9999.0
         self._buf_loci: list[QPointF] = []
         self._seed_wisps()
 
     def _spawn_wisp(self, idx: int, *, age_frac: float = 0.0) -> _CloudWisp:
-        life = self._rng.uniform(5.4, 11.6)
+        life = self._rng.uniform(5.6, 12.0)
         layer = 0 if (idx % 4 == 0) else (2 if (idx % 3 == 0) else 1)
         band_y = (
             self._rng.uniform(20.0, 96.0)
@@ -1931,13 +2060,13 @@ class CloudSmokeField:
             y_off=band_y,
             vx=self._rng.uniform(-1.5, 5.5),
             vy=self._rng.uniform(-4.0, 2.2),
-            radius=self._rng.uniform(34.0, 86.0),
-            stretch=self._rng.uniform(1.36, 2.52),
+            radius=self._rng.uniform(40.0, 98.0),
+            stretch=self._rng.uniform(1.38, 2.54),
             rot=self._rng.uniform(-21.0, 21.0),
             v_rot=self._rng.uniform(-4.0, 4.0),
             age=life * age_frac,
             life=life,
-            density=self._rng.uniform(0.76, 1.0),
+            density=self._rng.uniform(0.80, 1.0),
             layer=layer,
             seed=self._rng.uniform(0.0, 6.283),
             u_dir=1.0 if (idx % 5 != 0) else -1.0,
@@ -1976,6 +2105,8 @@ class CloudSmokeField:
         y0 = sky_rect.top()
         eff_left = min(x0, outer_rect.left()) if (outer_rect is not None and not outer_rect.isEmpty()) else x0
         eff_right = max(x0 + w, outer_rect.right()) if (outer_rect is not None and not outer_rect.isEmpty()) else (x0 + w)
+        span_x0 = eff_left
+        span_w = max(w, eff_right - eff_left)
         top_limit = y0 + 6.0
         bot_limit = max(top_limit + 28.0, y0 + min(158.0, sky_rect.height() * 0.44))
 
@@ -1999,7 +2130,7 @@ class CloudSmokeField:
             self._prev_cursor = None
 
         q_cl = max(0.25, min(1.0, float(quality)))
-        base_n = 112 + (self._POOL_SIZE - 112) * max(0.0, min(1.0, cloud_amt))
+        base_n = 72 + (self._POOL_SIZE - 72) * max(0.0, min(1.0, cloud_amt))
         active_count = max(32, min(self._POOL_SIZE, int(round(base_n * q_cl))))
         wind_eff = max(0.0, min(40.0, float(wind_ms)))
         # Strictly wind-scaled rightward velocity (+x in px/s converted to normalized span u)
@@ -2068,7 +2199,7 @@ class CloudSmokeField:
                 ws.vx = max(18.0, abs(ws.vx) * 0.72 + wind_px_per_s * 0.30)
 
             seed = ws.seed
-            base_cx = x0 + u * w
+            base_cx = span_x0 + u * span_w
             base_cy = y0 + ws.y_off + m_sin(phase_y + seed) * amp_y
 
             dx = ws.dx
@@ -2184,6 +2315,270 @@ class CloudSmokeField:
         return l0 + l1 + l2
 
 
+class ChimneySmokeField:
+    """Volumetric cloud-physics chimney plume: ultra-fast 0.20x buffer, billowing cloud puffs & mouse dissolution."""
+
+    _POOL_SIZE = 26
+
+    def __init__(self, seed: int = 109) -> None:
+        self._rng = random.Random(seed)
+        self._last_ts = 0.0
+        self._prev_cursor: QPointF | None = None
+        self._cursor_vx = 0.0
+        self._cursor_vy = 0.0
+        self._active = False
+        self._buf_img: QImage | None = None
+        self._buf_key: tuple | None = None
+        self._buf_ts: float = 0.0
+        self._buf_rect = QRectF()
+        self._buf_cur_x: float = -9999.0
+        self._buf_cur_y: float = -9999.0
+        # Per-puff state: [age, life, dx, dy, vx, vy, rot, v_rot, disp, rad_k, stretch, layer, seed]
+        self._puffs: list[list[float]] = [self._spawn_puff(i, age_frac=(i + 0.35) / self._POOL_SIZE) for i in range(self._POOL_SIZE)]
+
+    def _spawn_puff(self, idx: int, *, age_frac: float = 0.0) -> list[float]:
+        life = self._rng.uniform(4.6, 7.8)
+        layer = 0 if (idx % 4 == 0) else (2 if (idx % 3 == 0) else 1)
+        return [
+            life * age_frac,
+            life,
+            self._rng.uniform(-2.0, 2.0),
+            0.0,
+            self._rng.uniform(-2.5, 4.5),
+            self._rng.uniform(-3.0, 1.5),
+            self._rng.uniform(-18.0, 18.0),
+            self._rng.uniform(-5.5, 5.5),
+            0.0,
+            self._rng.uniform(0.84, 1.22),
+            self._rng.uniform(1.38, 2.18),
+            float(layer),
+            self._rng.uniform(0.0, 6.283),
+        ]
+
+    def is_dispersing(self) -> bool:
+        return self._active
+
+    def paint_plume(
+        self,
+        p: QPainter,
+        ch_x: float,
+        ch_y: float,
+        top_y: float,
+        sc: float,
+        phase_t: float,
+        wind_ms: float,
+        light_w: float,
+        cursor_local: QPointF | None,
+    ) -> None:
+        now_ts = time.monotonic()
+        rise_h = max(125.0 * sc, ch_y - top_y - 6.0 * sc)
+        wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
+        wind_force = max(0.0, min(1.0, abs(float(wind_ms)) / 20.0))
+        max_drift = (88.0 + wind_force * 170.0) * sc
+
+        bx0 = min(ch_x - 68.0 * sc, ch_x + wind_dir * max_drift - 95.0 * sc)
+        bx1 = max(ch_x + 95.0 * sc, ch_x + wind_dir * max_drift + 115.0 * sc)
+        by0 = min(top_y - 22.0, ch_y - rise_h - 48.0 * sc)
+        by1 = ch_y + 24.0 * sc
+        bw = max(96.0, bx1 - bx0)
+        bh = max(96.0, by1 - by0)
+
+        cur_in_plume = (
+            cursor_local is not None
+            and (bx0 - 36.0) <= cursor_local.x() <= (bx1 + 36.0)
+            and (by0 - 24.0) <= cursor_local.y() <= (by1 + 24.0)
+        )
+        cur_moved = (
+            cur_in_plume
+            and cursor_local is not None
+            and (abs(cursor_local.x() - self._buf_cur_x) > 1.2 or abs(cursor_local.y() - self._buf_cur_y) > 1.2)
+        )
+
+        # Match sky cloud lighting: warm hearth-lit belly -> soft cloud grey mid -> sky-lit top rim
+        if light_w >= 0.45:
+            belly_rgb = (72, 78, 96)
+            mid_rgb = (114, 124, 148)
+            top_rgb = (162, 176, 202)
+        else:
+            belly_rgb = (128, 132, 142)
+            mid_rgb = (182, 186, 196)
+            top_rgb = (232, 234, 240)
+
+        buf_scale = 0.20
+        iw = max(20, int(math.ceil(bw * buf_scale)))
+        ih = max(20, int(math.ceil(bh * buf_scale)))
+        buf_key = (iw, ih, round(bx0), round(by0), belly_rgb, top_rgb, round(wind_ms, 1))
+        min_dt = 0.028 if (cur_moved or self._active) else 0.095
+
+        if (
+            self._buf_img is not None
+            and self._buf_key == buf_key
+            and not cur_moved
+            and (now_ts - self._buf_ts) < min_dt
+        ):
+            p.save()
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            p.drawImage(self._buf_rect, self._buf_img)
+            p.restore()
+            return
+
+        raw_dt = (now_ts - self._last_ts) if self._last_ts > 0.0 else 0.032
+        dt_eff = max(0.010, min(0.075, raw_dt))
+        self._last_ts = now_ts
+
+        if cur_in_plume and cursor_local is not None:
+            if self._prev_cursor is not None:
+                av = min(1.0, dt_eff * 15.0)
+                vx_i = max(-900.0, min(900.0, (cursor_local.x() - self._prev_cursor.x()) / max(0.012, dt_eff)))
+                vy_i = max(-900.0, min(900.0, (cursor_local.y() - self._prev_cursor.y()) / max(0.012, dt_eff)))
+                self._cursor_vx += (vx_i - self._cursor_vx) * av
+                self._cursor_vy += (vy_i - self._cursor_vy) * av
+            self._prev_cursor = QPointF(cursor_local)
+            self._buf_cur_x = float(cursor_local.x())
+            self._buf_cur_y = float(cursor_local.y())
+        else:
+            dv = math.exp(-dt_eff / 0.14)
+            self._cursor_vx *= dv
+            self._cursor_vy *= dv
+            self._prev_cursor = None
+
+        if self._buf_img is None or self._buf_img.width() != iw or self._buf_img.height() != ih:
+            self._buf_img = QImage(iw, ih, QImage.Format.Format_ARGB32_Premultiplied)
+        self._buf_img.fill(0)
+
+        drag_v = math.exp(-dt_eff / 0.85)
+        drag_d = math.exp(-dt_eff / 2.3)
+        part_r = 92.0 * sc
+        cur_x = float(cursor_local.x()) if (cur_in_plume and cursor_local is not None) else -9999.0
+        cur_y = float(cursor_local.y()) if (cur_in_plume and cursor_local is not None) else -9999.0
+        cur_vx_k = self._cursor_vx * 0.28
+        cur_vy_k = self._cursor_vy * 0.24
+        cur_spd_disp = math.hypot(self._cursor_vx, self._cursor_vy) * 0.0016
+        disp_decay = dt_eff * 0.26
+        any_disp = False
+
+        layer_luts = (
+            _get_smoke_layer_lut(belly_rgb),
+            _get_smoke_layer_lut(mid_rgb),
+            _get_smoke_layer_lut(top_rgb),
+        )
+        m_sin = math.sin
+        m_cos = math.cos
+        m_hypot = math.hypot
+        draw_layers: tuple[list[tuple[float, float, float, float, QImage, float]], ...] = ([], [], [])
+        rx_k = buf_scale * 1.18
+        ry_k = buf_scale * 1.12
+
+        for idx, pf in enumerate(self._puffs):
+            age = pf[0] + dt_eff
+            life = pf[1]
+            disp = pf[8]
+            if age >= life or disp >= 0.97:
+                npf = self._spawn_puff(idx, age_frac=0.0)
+                self._puffs[idx] = npf
+                pf = npf
+                age = 0.0
+                life = pf[1]
+                disp = 0.0
+
+            u = age / max(0.25, life)
+            seed = pf[12]
+            # Billowing plume spine: tight column leaving chimney -> curling wind-bent cloud ribbon aloft
+            base_x = (
+                ch_x
+                + wind_dir * (u ** 1.38) * max_drift
+                + m_sin(phase_t * 1.35 + seed + u * 4.8) * (4.5 + u * 22.0) * sc
+                + m_cos(phase_t * 0.78 - seed * 1.3 + u * 2.6) * (u * 12.0) * sc
+            )
+            base_y = ch_y - 3.0 * sc - (u ** 0.82) * rise_h + m_sin(phase_t * 1.1 + seed * 1.7) * (3.5 * u * sc)
+
+            dx = pf[2]
+            dy = pf[3]
+            vx = pf[4] + m_cos(phase_t * 0.9 + seed + u * 3.1) * (9.0 * dt_eff)
+            vy = pf[5] - (4.5 * dt_eff)
+
+            wx = base_x + dx
+            wy = base_y + dy
+            if cur_in_plume:
+                rx_c = wx - cur_x
+                ry_c = wy - cur_y
+                if -part_r < rx_c < part_r and -part_r < ry_c < part_r:
+                    dist = m_hypot(rx_c, ry_c * 1.12)
+                    if dist < part_r:
+                        norm = 1.0 - dist / part_r
+                        inf = norm * norm * 1.35
+                        ux_c = (rx_c / dist) if dist > 2.0 else (1.0 if (idx & 1) == 0 else -1.0)
+                        uy_c = (ry_c / dist) if dist > 2.0 else -0.8
+                        swirl = 1.0 if (idx & 1) == 0 else -1.0
+                        vx += (ux_c * 240.0 * inf - uy_c * swirl * 92.0 * inf + cur_vx_k * norm) * (dt_eff * 3.0)
+                        vy += (uy_c * 210.0 * inf + ux_c * swirl * 76.0 * inf + cur_vy_k * norm) * (dt_eff * 3.0)
+                        disp = min(1.0, disp + dt_eff * (1.55 * inf + cur_spd_disp * norm))
+
+            vx *= drag_v
+            vy *= drag_v
+            dx = (dx + vx * dt_eff) * drag_d
+            dy = (dy + vy * dt_eff) * drag_d
+            disp = disp - disp_decay if disp > disp_decay else 0.0
+            if disp > 0.04:
+                any_disp = True
+
+            rot = pf[6] + pf[7] * dt_eff + (self._cursor_vx * 0.016 * disp if disp > 0.04 else 0.0)
+            pf[0] = age
+            pf[2] = dx
+            pf[3] = dy
+            pf[4] = vx
+            pf[5] = vy
+            pf[6] = rot
+            pf[8] = disp
+
+            fade_in = u / 0.14 if u < 0.14 else 1.0
+            fade_out = 1.0 if u <= 0.64 else max(0.0, (1.0 - u) / 0.36)
+            eff_a = 0.62 * fade_in * fade_out * ((1.0 - disp) ** 1.62)
+            if eff_a <= 0.008:
+                continue
+
+            # Expand smoothly from compact chimney puff into broad horizontal sky-cloud billow
+            rad = (12.0 + (u ** 0.78) * 48.0) * pf[9] * (1.0 + disp * 0.95) * sc
+            stretch = 1.12 + (pf[10] - 1.12) * min(1.0, u * 1.45)
+            px_b = (base_x + dx - bx0) * buf_scale
+            py_b = (base_y + dy - by0) * buf_scale
+            rx_b = rad * (1.0 if stretch < 1.55 else stretch * 0.64) * rx_k
+            ry_b = rad * ry_k
+            if px_b + rx_b <= 0.0 or px_b - rx_b >= iw or py_b + ry_b <= 0.0 or py_b - ry_b >= ih:
+                continue
+
+            tb = round(rot / 3.5)
+            if tb < -6:
+                tb = -6
+            elif tb > 6:
+                tb = 6
+            layer_i = int(pf[11])
+            sp_img = layer_luts[layer_i][(idx % 3) * 13 + (tb + 6)]
+            draw_layers[layer_i].append((px_b - rx_b, py_b - ry_b, rx_b * 2.0, ry_b * 2.0, sp_img, min(0.82, eff_a)))
+
+        bp = QPainter(self._buf_img)
+        bp_draw = bp.drawImage
+        bp_op = bp.setOpacity
+        for lay in draw_layers:
+            for x_d, y_d, w_d, h_d, sp_i, op_v in lay:
+                bp_op(op_v)
+                bp_draw(QRectF(x_d, y_d, w_d, h_d), sp_i)
+        bp.end()
+
+        self._active = any_disp
+        self._buf_rect = QRectF(bx0, by0, bw, bh)
+        self._buf_key = buf_key
+        self._buf_ts = now_ts
+
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.drawImage(self._buf_rect, self._buf_img)
+        p.restore()
+
+
+_CHIMNEY_SMOKE_SIM = ChimneySmokeField()
+
+
 class AtmosphereAnimator:
     """Smooth continuous transition controller for sky brightness, rain/snow tapering, and Sun->Moon crossfades."""
 
@@ -2198,6 +2593,7 @@ class AtmosphereAnimator:
         "snow_accum",
         "snowman_p",
         "tree_vis",
+        "leafy_grow",
         "cloud_amt",
         "clear_amt",
         "sun_alpha",
@@ -2217,6 +2613,7 @@ class AtmosphereAnimator:
         self.snow_accum = 0.0
         self.snowman_p = 0.0
         self.tree_vis = 0.0
+        self.leafy_grow = 1.0
         self.cloud_amt = 0.35
         self.clear_amt = 1.0
         self.sun_alpha = 0.0
@@ -2300,6 +2697,7 @@ class AtmosphereAnimator:
             self.snow_accum = 0.0
             self.snowman_p = 0.0
             self.tree_vis = 1.0 if t_sn > 0.5 else 0.0
+            self.leafy_grow = 0.0 if t_sn > 0.5 else 1.0
             self.cloud_amt = t_cl
             self.clear_amt = t_br
             self.sun_alpha = 1.0 if t_sun is not None else 0.0
@@ -2314,22 +2712,27 @@ class AtmosphereAnimator:
         self.thunder_amt = self._exp_lerp(self.thunder_amt, t_th, dt_eff, 0.85)
         self.lightning_amt = self._exp_lerp(self.lightning_amt, t_li, dt_eff, 0.70)
         self.snow_amt = self._exp_lerp(self.snow_amt, t_sn, dt_eff, 1.05)
-        if self.snow_amt > 0.25:
-            # Gradually build snowdrifts (~0 -> 1.0 over ~60s of sustained snowfall)
-            self.snow_accum = min(1.0, self.snow_accum + (snow_dt / 60.0) * self.snow_amt)
-            # Live self-rolling snowman builds right in front of the user (~9s)
-            self.snowman_p = min(1.0, self.snowman_p + (dt_eff / 9.0) * self.snow_amt)
+        if t_sn > 0.5 or self.snow_amt > 0.35:
+            # Summer trees fold branches & sink underground first, then New Year pine rises & unfolds!
+            self.leafy_grow = max(0.0, self.leafy_grow - dt_eff / 1.30)
+            if self.leafy_grow < 0.42:
+                self.tree_vis = min(1.0, self.tree_vis + dt_eff / 1.55)
+            self.snow_accum = min(1.0, self.snow_accum + (snow_dt / 60.0) * max(0.3, self.snow_amt))
+            self.snowman_p = min(1.0, self.snowman_p + (dt_eff / 9.0) * max(0.3, self.snow_amt))
         elif self.rain_amt > 0.25:
-            # Rain rapidly washes/melts snowdrifts
+            # Rain washes snowdrifts; New Year pine folds & sinks into earth, then summer trees rise & unfold!
             self.snow_accum = max(0.0, self.snow_accum - snow_dt / 14.0)
             self.snowman_p = max(0.0, self.snowman_p - dt_eff / 2.2)
-            self.tree_vis = max(0.0, self.tree_vis - dt_eff / 1.5)
+            self.tree_vis = max(0.0, self.tree_vis - dt_eff / 1.35)
+            if self.tree_vis < 0.42:
+                self.leafy_grow = min(1.0, self.leafy_grow + dt_eff / 1.55)
         else:
-            # Gentle ambient melt after snowfall stops
+            # Post-New-Year transition: pine folds & sinks into ground, then summer trees rise & spread crowns!
             self.snow_accum = max(0.0, self.snow_accum - snow_dt / 40.0)
-            self.snowman_p = max(0.0, self.snowman_p - dt_eff / 3.5)
-            if self.snow_amt <= 0.08:
-                self.tree_vis = max(0.0, self.tree_vis - dt_eff / 1.8)
+            self.snowman_p = max(0.0, self.snowman_p - dt_eff / 3.2)
+            self.tree_vis = max(0.0, self.tree_vis - dt_eff / 1.45)
+            if self.tree_vis < 0.42:
+                self.leafy_grow = min(1.0, self.leafy_grow + dt_eff / 1.60)
         self.cloud_amt = self._exp_lerp(self.cloud_amt, t_cl, dt_eff, 1.20)
         self.clear_amt = self._exp_lerp(self.clear_amt, t_br, dt_eff, 1.15)
 
@@ -2342,15 +2745,18 @@ class AtmosphereAnimator:
         return seg, wkind, forced_moon
 
     def on_island_collapsed(self) -> None:
-        """Called when the user closes/collapses the island so the New Year tree appears off-screen."""
+        """Called when the user closes/collapses the island."""
         if self.snow_amt > 0.25:
             self.tree_vis = 1.0
+            self.leafy_grow = 0.0
 
     def is_transitioning(self) -> bool:
         return (
             0.02 < self.rain_amt < 0.98
             or 0.02 < self.snow_amt < 0.98
             or (self.snow_amt > 0.25 and 0.0 < self.snowman_p < 1.0)
+            or 0.005 < self.tree_vis < 0.995
+            or 0.005 < self.leafy_grow < 0.995
             or 0.02 < self.sun_alpha < 0.98
             or 0.02 < self.moon_alpha < 0.98
             or max(self.seg_weights.values()) < 0.96
@@ -2773,17 +3179,34 @@ class AtmosphericScenePainter:
             and cursor_local.x() > -120.0
             and (y0 - 45.0) <= cursor_local.y() <= (y0 + 185.0)
         )
-        buf_key = (iw, ih, round(buf_x0), round(buf_y0), top_rgb, mid_rgb, belly_rgb, round(base_opacity, 2), is_storm, round(wind_ms, 1))
+        cur_moved_sky = (
+            cursor_in_sky
+            and cursor_local is not None
+            and sim is not None
+            and (abs(cursor_local.x() - sim._buf_cur_x) > 1.2 or abs(cursor_local.y() - sim._buf_cur_y) > 1.2)
+        )
+        min_cloud_dt = 0.020 if (cur_moved_sky or (sim is not None and sim.is_dispersing())) else 0.088
+        buf_key = (
+            iw,
+            ih,
+            round(buf_x0),
+            round(buf_y0),
+            (top_rgb[0] & 0xFC, top_rgb[1] & 0xFC, top_rgb[2] & 0xFC),
+            (mid_rgb[0] & 0xFC, mid_rgb[1] & 0xFC, mid_rgb[2] & 0xFC),
+            (belly_rgb[0] & 0xFC, belly_rgb[1] & 0xFC, belly_rgb[2] & 0xFC),
+            round(base_opacity, 2),
+            is_storm,
+            round(wind_ms, 1),
+        )
         if (
             not is_transient
             and sim is not None
-            and not cursor_in_sky
-            and not sim.is_dispersing()
+            and not cur_moved_sky
             and sim._buf_img is not None
             and sim._buf_img.width() == iw
             and sim._buf_img.height() == ih
             and sim._buf_key == buf_key
-            and (now_b - sim._buf_ts) < 0.085
+            and (now_b - sim._buf_ts) < min_cloud_dt
         ):
             buf_target = sim._buf_img
             smoke_loci = sim._buf_loci
@@ -2792,9 +3215,12 @@ class AtmosphericScenePainter:
                 sim = CloudSmokeField(seed=17)
                 drift_arg = float(cloud_phase) if cloud_phase is not None else float(phase_t)
                 static_u = drift_arg * (0.004 + max(0.0, float(wind_ms)) * 0.022)
-                wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, dt=0.04, drift_offset=static_u, quality=quality, outer_rect=None)
+                wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, dt=0.04, drift_offset=static_u, quality=quality, outer_rect=outer_rect)
             else:
-                wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, quality=quality, outer_rect=None)
+                wisps = sim.step(sky_rect, cloud_amt, wind_ms, phase_t, cursor_local, quality=quality, outer_rect=outer_rect)
+                if cursor_local is not None and cursor_in_sky:
+                    sim._buf_cur_x = float(cursor_local.x())
+                    sim._buf_cur_y = float(cursor_local.y())
             if is_transient:
                 if _SMOKE_BUF_IMG is None or _SMOKE_BUF_IMG.width() != iw or _SMOKE_BUF_IMG.height() != ih:
                     _SMOKE_BUF_IMG = QImage(iw, ih, QImage.Format.Format_ARGB32_Premultiplied)
@@ -2809,20 +3235,18 @@ class AtmosphericScenePainter:
             # Outer drawImage already applies bilinear smoothing; skip inner SmoothPixmapTransform on weak GPUs/CPUs
             rx_k = buf_scale * 1.18
             ry_k = buf_scale * 1.32
-            op_base = base_opacity * 0.74
+            op_base = base_opacity * 0.78
             layer_luts = (
                 _get_smoke_layer_lut(belly_rgb),
                 _get_smoke_layer_lut(mid_rgb),
                 _get_smoke_layer_lut(top_rgb),
             )
             smoke_loci = []
-            sp_src = QRectF(0.0, 0.0, 88.0, 54.0)
             bp_draw_img = bp.drawImage
             bp_set_op = bp.setOpacity
             x_hi = x0 + w + 20.0
             x_lo = x0 - 20.0
             for cx, cy, rad, stretch, rot, eff_a, disp, layer in wisps:
-                # Stable per-wisp hash so spawning/dissolving neighbors never shift active wisp shapes
                 w_id = int(stretch * 1000.0)
                 if is_storm and layer >= 1 and disp < 0.55 and x_lo <= cx <= x_hi and (w_id & 1) == 0:
                     smoke_loci.append(QPointF(cx, cy))
@@ -2848,7 +3272,7 @@ class AtmosphericScenePainter:
                 if op > 0.88:
                     op = 0.88
                 bp_set_op(op)
-                bp_draw_img(QRectF(bx - rx, by - ry, rx * 2.0, ry * 2.0), sp_img, sp_src)
+                bp_draw_img(QRectF(bx - rx, by - ry, rx * 2.0, ry * 2.0), sp_img)
             bp.end()
 
             if not is_transient:
@@ -3231,8 +3655,9 @@ class AtmosphericScenePainter:
         grass_sim: GrassSkeletonSim | None = None,
         anim_state: AtmosphereAnimator | None = None,
         quality: float = 1.0,
+        z_mode: str = "all",
     ) -> None:
-        """Draw dense realistic 3-4 cm grass, wet rainwater earth/puddles, ~60s snowdrifts, and cached humus strata."""
+        """Render 3D sloped meadow terrain, perspective footpath, and multi-depth sloped grass (including off-screen stretch)."""
         rain_vis = anim_state.rain_amt if (anim_state is not None and anim_state.initialized) else (1.0 if weather_kind in ("rain", "thunder", "lightning") else 0.0)
         snow_vis = anim_state.snow_amt if (anim_state is not None and anim_state.initialized) else (1.0 if weather_kind == "snow" else 0.0)
         wet = weather_kind in ("rain", "thunder", "lightning", "fog") or rain_vis > 0.25
@@ -3244,6 +3669,8 @@ class AtmosphericScenePainter:
         else:
             snow_accum = 0.0
 
+        sc = max(0.45, min(1.15, float(core.height()) / 560.0))
+        cx0 = core.center().x()
         turf_y = core.bottom() - 5.0
         eff_left = min(core.left(), outer_rect.left()) - 24.0 if outer_rect is not None else core.left() - 24.0
         eff_right = max(core.right(), outer_rect.right()) + 24.0 if outer_rect is not None else core.right() + 24.0
@@ -3252,299 +3679,312 @@ class AtmosphericScenePainter:
             core.bottom(),
             float(outer_bottom) if outer_bottom is not None else core.bottom(),
             outer_rect.bottom() if outer_rect is not None else core.bottom(),
-        ) + 16.0
-        ground_top = turf_y - 108.0
-        soil_world_x0 = core.left() - 96.0
-        soil_world_w = max(240.0, core.width() + 192.0)
+        ) + 22.0
 
-        def _turf_y_at(xv: float) -> float:
-            rel = xv - core.left()
-            return turf_y + math.sin(rel * 0.032) * 1.45 + math.cos(rel * 0.082) * 0.60
+        # Canonical wide 3D hillside span so liquid droplet stretch NEVER rebuilds _SOIL_BACKDROP_CACHE!
+        world_half_w = max(660.0, core.width() * 0.5 + 310.0)
+        soil_world_x0 = cx0 - world_half_w
+        soil_world_x1 = cx0 + world_half_w
+        soil_world_w = soil_world_x1 - soil_world_x0
+        crest_min_y = turf_y - 142.0 * sc
+        soil_canon_bot = max(soil_bottom, core.bottom() + 92.0)
 
-        step_px = 16.0
-        k_start = math.ceil((eff_left - core.left()) / step_px)
-        k_end = math.floor((eff_right - core.left()) / step_px)
+        if z_mode in ("all", "back"):
+            soil_dpr = max(1.0, float(p.device().devicePixelRatioF())) if p.device() is not None else 1.0
+            accum_q = int(round(snow_accum * 10.0))
+            core_w_q = int(round(core.width()))
+            core_h_q = int(round(core.height()))
+            rain_q = int(round(rain_vis * 6.0)) if rain_vis > 0.08 else 0
+            soil_key = (
+                core_w_q,
+                core_h_q,
+                int(round(max(0.0, soil_bottom - core.bottom()) / 16.0)),
+                bool(wet),
+                bool(snowy),
+                segment,
+                accum_q,
+                rain_q,
+                round(soil_dpr, 2),
+            )
+            soil_img = _SOIL_BACKDROP_CACHE.get(soil_key)
+            if soil_img is None:
+                _evict_oldest(_SOIL_BACKDROP_CACHE, 12, 4)
+                sw_px = max(32, int(math.ceil(soil_world_w * soil_dpr)))
+                sh_px = max(32, int(math.ceil((soil_canon_bot - crest_min_y) * soil_dpr)))
+                soil_img = QImage(sw_px, sh_px, QImage.Format.Format_ARGB32_Premultiplied)
+                soil_img.setDevicePixelRatio(soil_dpr)
+                soil_img.fill(0)
+                sp = QPainter(soil_img)
+                sp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                sp.translate(-soil_world_x0, -crest_min_y)
 
-        soil_dpr = max(1.0, float(p.device().devicePixelRatioF())) if p.device() is not None else 1.0
-        accum_q = int(round(snow_accum * 24.0))
-        core_w_q = int(round(core.width()))
-        rain_q = int(round(rain_vis * 12.0)) if rain_vis > 0.08 else 0
-        soil_img_left = min(eff_left, soil_world_x0) - 4.0
-        soil_img_right = max(eff_right, soil_world_x0 + soil_world_w) + 4.0
-        soil_img_top = min(ground_top, turf_y - 44.0) - 4.0
-        soil_img_bot = max(soil_bottom, turf_y + 68.0) + 4.0
-        soil_key = (
-            core_w_q,
-            int(round(eff_left - core.left())),
-            int(round(eff_right - core.left())),
-            int(round(soil_bottom - core.bottom())),
-            bool(wet),
-            bool(snowy),
-            segment,
-            accum_q,
-            rain_q,
-            round(soil_dpr, 2),
-        )
-        soil_img = _SOIL_BACKDROP_CACHE.get(soil_key)
-        if soil_img is None:
-            _evict_oldest(_SOIL_BACKDROP_CACHE, 16, 4)
-            sw_px = max(16, int(math.ceil((soil_img_right - soil_img_left) * soil_dpr)))
-            sh_px = max(16, int(math.ceil((soil_img_bot - soil_img_top) * soil_dpr)))
-            soil_img = QImage(sw_px, sh_px, QImage.Format.Format_ARGB32_Premultiplied)
-            soil_img.setDevicePixelRatio(soil_dpr)
-            soil_img.fill(0)
-            sp = QPainter(soil_img)
-            sp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            sp.translate(-soil_img_left, -soil_img_top)
+                # Palette for 3D sloped meadow (sunlit distant ridge -> mid hillside -> rich foreground shadow)
+                if snowy:
+                    c_crest = QColor(226, 238, 252, 244)
+                    c_mid_h = QColor(196, 214, 236, 248)
+                    c_front = QColor(156, 180, 210, 254)
+                    c_swell_hi = QColor(248, 252, 255, 118)
+                    c_swell_sh = QColor(136, 162, 196, 86)
+                    c_rim = QColor(246, 250, 255, 165)
+                elif wet:
+                    c_crest = QColor(34, 78, 48, 242)
+                    c_mid_h = QColor(22, 58, 34, 248)
+                    c_front = QColor(11, 34, 19, 254)
+                    c_swell_hi = QColor(64, 122, 76, 82)
+                    c_swell_sh = QColor(8, 24, 14, 96)
+                    c_rim = QColor(88, 148, 102, 95)
+                elif segment in ("sunrise", "sunset"):
+                    c_crest = QColor(84, 118, 56, 240)
+                    c_mid_h = QColor(48, 84, 38, 248)
+                    c_front = QColor(22, 46, 23, 254)
+                    c_swell_hi = QColor(154, 162, 78, 86)
+                    c_swell_sh = QColor(18, 36, 18, 88)
+                    c_rim = QColor(186, 174, 96, 115)
+                elif segment == "night":
+                    c_crest = QColor(26, 60, 44, 242)
+                    c_mid_h = QColor(16, 42, 30, 248)
+                    c_front = QColor(8, 24, 17, 254)
+                    c_swell_hi = QColor(44, 92, 68, 72)
+                    c_swell_sh = QColor(5, 16, 11, 96)
+                    c_rim = QColor(68, 118, 92, 85)
+                else:
+                    c_crest = QColor(64, 134, 66, 242)
+                    c_mid_h = QColor(38, 98, 44, 248)
+                    c_front = QColor(18, 58, 26, 254)
+                    c_swell_hi = QColor(106, 176, 92, 88)
+                    c_swell_sh = QColor(14, 46, 20, 84)
+                    c_rim = QColor(134, 198, 112, 112)
 
-            ground_rect = QRectF(eff_left, ground_top, eff_width, max(12.0, soil_bottom - ground_top))
-            # Anchor vertical soil gradient strictly to fixed `core` coordinates so stretching outer_rect NEVER shifts interior pixels!
-            core_soil_h = max(24.0, (core.bottom() + 26.0) - ground_top)
-            turf_stop = max(0.25, min(0.85, (turf_y - ground_top) / core_soil_h))
-            ground_grad = QLinearGradient(QPointF(eff_left, ground_top), QPointF(eff_left, ground_top + core_soil_h))
-            ground_grad.setColorAt(0.0, QColor(0, 0, 0, 0))
-            if wet:
-                ground_grad.setColorAt(max(0.05, turf_stop * 0.55), QColor(34, 30, 26, 108))
-                ground_grad.setColorAt(turf_stop, QColor(36, 28, 21, 236))
-                ground_grad.setColorAt(1.0, QColor(18, 14, 10, 250))
-            elif snowy:
-                ground_grad.setColorAt(max(0.05, turf_stop * 0.55), QColor(74, 72, 68, 88))
-                ground_grad.setColorAt(turf_stop, QColor(76, 66, 54, 224))
-                ground_grad.setColorAt(1.0, QColor(44, 38, 31, 244))
-            elif segment in ("sunrise", "sunset"):
-                ground_grad.setColorAt(max(0.05, turf_stop * 0.55), QColor(88, 66, 48, 88))
-                ground_grad.setColorAt(turf_stop, QColor(84, 60, 40, 225))
-                ground_grad.setColorAt(1.0, QColor(48, 34, 23, 245))
-            else:
-                ground_grad.setColorAt(max(0.05, turf_stop * 0.55), QColor(76, 68, 50, 88))
-                ground_grad.setColorAt(turf_stop, QColor(78, 62, 46, 225))
-                ground_grad.setColorAt(1.0, QColor(46, 36, 27, 245))
-            sp.setPen(Qt.PenStyle.NoPen)
-            sp.setBrush(ground_grad)
-            sp.drawRect(ground_rect)
+                # 1) Main 3D convex sloped hillside body from crest (z=1.0) down to bottom
+                hill_poly = QPainterPath()
+                crest_line = QPainterPath()
+                step_hx = 14.0
+                n_steps_h = int(math.ceil(soil_world_w / step_hx))
+                for si in range(n_steps_h + 1):
+                    wx = soil_world_x0 + min(soil_world_w, si * step_hx)
+                    wy = _meadow_crest_y(wx, cx0, turf_y, sc)
+                    if si == 0:
+                        hill_poly.moveTo(wx, wy)
+                        crest_line.moveTo(wx, wy)
+                    else:
+                        hill_poly.lineTo(wx, wy)
+                        crest_line.lineTo(wx, wy)
+                hill_poly.lineTo(soil_world_x1, soil_canon_bot)
+                hill_poly.lineTo(soil_world_x0, soil_canon_bot)
+                hill_poly.closeSubpath()
 
-            # Anchor interior polygon steps strictly to core.left() + k*step_px so outer_rect stretch preserves exact horizon geometry
-            earth_poly = QPainterPath()
-            earth_ridge = QPainterPath()
-            first_y = _turf_y_at(eff_left)
-            earth_poly.moveTo(eff_left, first_y)
-            earth_ridge.moveTo(eff_left, first_y)
-            for ki in range(k_start, k_end + 1):
-                ex = core.left() + ki * step_px
-                if ex <= eff_left + 0.01 or ex >= eff_right - 0.01:
-                    continue
-                ey = _turf_y_at(ex)
-                earth_poly.lineTo(ex, ey)
-                earth_ridge.lineTo(ex, ey)
-            last_y = _turf_y_at(eff_right)
-            earth_poly.lineTo(eff_right, last_y)
-            earth_ridge.lineTo(eff_right, last_y)
-            earth_poly.lineTo(eff_right, soil_bottom)
-            earth_poly.lineTo(eff_left, soil_bottom)
-            earth_poly.closeSubpath()
+                # Diagonal 3D sun-angle gradient matching the hillside incline
+                hill_grad = QLinearGradient(
+                    QPointF(cx0 - 180.0 * sc, turf_y - 118.0 * sc),
+                    QPointF(cx0 + 140.0 * sc, turf_y + 24.0 * sc),
+                )
+                hill_grad.setColorAt(0.0, c_crest)
+                hill_grad.setColorAt(0.48, c_mid_h)
+                hill_grad.setColorAt(1.0, c_front)
+                sp.setPen(Qt.PenStyle.NoPen)
+                sp.setBrush(hill_grad)
+                sp.drawPath(hill_poly)
 
-            shelf_grad = QLinearGradient(QPointF(core.left(), turf_y - 6.0), QPointF(core.left(), core.bottom() + 26.0))
-            if snowy:
-                shelf_grad.setColorAt(0.0, QColor(208, 224, 242, 232))
-                shelf_grad.setColorAt(0.48, QColor(186, 206, 230, 244))
-                shelf_grad.setColorAt(1.0, QColor(156, 180, 210, 250))
-                humus_rgb = (224, 236, 248)
-                mist_rgb = (186, 206, 230)
-            elif wet:
-                shelf_grad.setColorAt(0.0, QColor(24, 62, 34, 236))
-                shelf_grad.setColorAt(0.48, QColor(18, 48, 26, 246))
-                shelf_grad.setColorAt(1.0, QColor(12, 34, 18, 252))
-                humus_rgb = (30, 74, 40)
-                mist_rgb = (44, 96, 56)
-            elif segment in ("sunrise", "sunset"):
-                shelf_grad.setColorAt(0.0, QColor(42, 86, 40, 232))
-                shelf_grad.setColorAt(0.48, QColor(32, 68, 32, 244))
-                shelf_grad.setColorAt(1.0, QColor(22, 48, 24, 250))
-                humus_rgb = (54, 102, 46)
-                mist_rgb = (78, 118, 58)
-            elif segment == "night":
-                shelf_grad.setColorAt(0.0, QColor(18, 46, 30, 234))
-                shelf_grad.setColorAt(0.48, QColor(13, 35, 24, 246))
-                shelf_grad.setColorAt(1.0, QColor(8, 24, 16, 252))
-                humus_rgb = (22, 58, 38)
-                mist_rgb = (34, 72, 50)
-            else:
-                shelf_grad.setColorAt(0.0, QColor(38, 102, 46, 232))
-                shelf_grad.setColorAt(0.48, QColor(28, 82, 36, 244))
-                shelf_grad.setColorAt(1.0, QColor(18, 60, 26, 250))
-                humus_rgb = (48, 122, 56)
-                mist_rgb = (68, 144, 72)
-            sp.setPen(Qt.PenStyle.NoPen)
-            sp.setBrush(shelf_grad)
-            sp.drawPath(earth_poly)
+                sp.save()
+                sp.setClipPath(hill_poly)
 
-            # Sloped 3D meadow grass-tuft texture & snowdrift crust (no underground dirt/bones/gems)
-            crust_key = (core_w_q, bool(wet), bool(snowy), segment, accum_q)
-            crust_pm = _SOIL_CRUST_CACHE.get(crust_key)
-            crust_w = max(240, int(math.ceil(soil_world_w)))
-            crust_h = 112
-            crust_top = turf_y - 44.0
-            if crust_pm is None:
-                if len(_SOIL_CRUST_CACHE) >= 32:
-                    _SOIL_CRUST_CACHE.clear()
-                crust_pm = QPixmap(crust_w, crust_h)
-                crust_pm.fill(Qt.GlobalColor.transparent)
-                cp = QPainter(crust_pm)
-                cp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                cp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-                cp.setPen(Qt.PenStyle.NoPen)
-                src_puff = QRectF(0.0, 0.0, 128.0, 128.0)
-                n_soil_puffs = max(40, int(round(soil_world_w / 16.0)))
-                for gi in range(n_soil_puffs):
-                    rel_x = ((gi * 0.61803398875) % 1.0) * soil_world_w
-                    gx = soil_world_x0 + rel_x
-                    layer_s = gi % 3
-                    depth_off = 2.0 + ((gi * 19 + 5) % 34) * (1.2 if layer_s == 0 else 0.72)
-                    gy_world = _turf_y_at(gx) + (depth_off - 4.5 if layer_s == 2 else depth_off)
-                    gy_loc = gy_world - crust_top
-                    rw = 32.0 + ((gi * 17) % 24)
-                    rh = 9.0 + ((gi * 11) % 8)
-                    rgb_s = humus_rgb if layer_s != 1 else mist_rgb
-                    puff_s = _get_smoke_puff_pixmap(rgb_s, gi % 3)
-                    cp.save()
-                    cp.setOpacity(0.32 if layer_s == 0 else (0.26 if layer_s == 1 else 0.38))
-                    cp.translate(rel_x, gy_loc)
-                    cp.drawPixmap(QRectF(-rw, -rh, rw * 2.0, rh * 2.0), puff_s, src_puff)
-                    cp.restore()
+                # 2) Sculpted 3D hillside contour terraces & diagonal valley shadows (unmistakable 3D surface relief!)
+                for z_hi, z_lo, band_amp in ((0.78, 0.56, 5.5), (0.50, 0.28, 6.5), (0.24, 0.04, 5.0)):
+                    band_p = QPainterPath()
+                    for si in range(0, n_steps_h + 1, 2):
+                        wx = soil_world_x0 + min(soil_world_w, si * step_hx)
+                        wave_z = math.sin((wx - cx0) * 0.0085 + z_hi * 4.0) * 0.045
+                        wy = _meadow_surface_y(wx, z_hi + wave_z, cx0, turf_y, sc) - band_amp * sc * 0.25
+                        if si == 0:
+                            band_p.moveTo(wx, wy)
+                        else:
+                            band_p.lineTo(wx, wy)
+                    for si in range(n_steps_h, -1, -2):
+                        wx = soil_world_x0 + min(soil_world_w, si * step_hx)
+                        wave_z = math.cos((wx - cx0) * 0.0072 - z_lo * 3.5) * 0.045
+                        wy = _meadow_surface_y(wx, z_lo + wave_z, cx0, turf_y, sc)
+                        band_p.lineTo(wx, wy)
+                    band_p.closeSubpath()
 
-                # Subtle perspective grass blades / snow speckles along the sloped foreground meadow
-                n_grains = max(44, int(round(soil_world_w / 12.0)))
-                for gi in range(n_grains):
-                    rel_x = (gi * 47.3 + 13.0) % soil_world_w
-                    gx = soil_world_x0 + rel_x
-                    gy_loc = (_turf_y_at(gx) + 3.0 + ((gi * 19.7) % 42.0)) - crust_top
-                    cp.setBrush(QColor(mist_rgb[0], mist_rgb[1], mist_rgb[2], 95))
-                    cp.drawEllipse(QPointF(rel_x, gy_loc), 2.2, 0.85)
+                    bg_t = QLinearGradient(
+                        QPointF(cx0, _meadow_surface_y(cx0, z_hi, cx0, turf_y, sc) - 8.0 * sc),
+                        QPointF(cx0, _meadow_surface_y(cx0, z_lo, cx0, turf_y, sc) + 8.0 * sc),
+                    )
+                    bg_t.setColorAt(0.0, c_swell_hi)
+                    bg_t.setColorAt(0.55, QColor(0, 0, 0, 0))
+                    bg_t.setColorAt(1.0, c_swell_sh)
+                    sp.setBrush(bg_t)
+                    sp.drawPath(band_p)
 
-                # Progressive undulating snowdrifts built over ~60s of snowfall
-                if accum_q > 0:
-                    s_dep = accum_q / 24.0
-                    drift_base = QPainterPath()
-                    base_loc_y = (turf_y - crust_top) + 10.0
-                    drift_base.moveTo(0.0, base_loc_y)
-                    for sx_i in range(0, crust_w + 8, 8):
-                        wx = soil_world_x0 + sx_i
-                        rel = wx - core.left()
-                        dune = (
-                            0.48
-                            + 0.34 * math.sin(rel * 0.021 + 0.5)
-                            + 0.18 * math.cos(rel * 0.053 - 0.8)
+                # 3) Winding 3D perspective footpath descending from the cabin door down the sloped meadow
+                if core.width() > 300.0:
+                    path_p = QPainterPath()
+                    left_pts: list[QPointF] = []
+                    right_pts: list[QPointF] = []
+                    for pi in range(13):
+                        uz = pi / 12.0  # 0 = foreground wide, 1 = cabin door narrow
+                        zf = uz * 0.75
+                        curve_x = (
+                            cx0
+                            - 18.0 * sc * uz
+                            + math.sin((1.0 - uz) * 2.65 - 0.35) * 34.0 * sc * (1.0 - uz * 0.55)
                         )
-                        drift_h = (2.2 + 16.5 * s_dep * dune) * min(1.0, s_dep * 1.4)
-                        dy_loc = (_turf_y_at(wx) - drift_h) - crust_top
-                        drift_base.lineTo(float(sx_i), dy_loc)
-                    drift_base.lineTo(float(crust_w), base_loc_y)
-                    drift_base.closeSubpath()
+                        py_s = _meadow_surface_y(curve_x, zf, cx0, turf_y, sc) + (1.0 - uz) * 6.0 * sc
+                        half_pw = (24.0 * (1.0 - 0.70 * uz)) * sc
+                        left_pts.append(QPointF(curve_x - half_pw, py_s))
+                        right_pts.append(QPointF(curve_x + half_pw, py_s + 1.5 * sc))
+                    path_p.moveTo(left_pts[0])
+                    for pt in left_pts[1:]:
+                        path_p.lineTo(pt)
+                    for pt in reversed(right_pts):
+                        path_p.lineTo(pt)
+                    path_p.closeSubpath()
 
-                    drift_grad = QLinearGradient(QPointF(0.0, (turf_y - crust_top) - 20.0), QPointF(0.0, base_loc_y))
-                    top_a = min(248, int(round(135 + 115 * s_dep)))
-                    drift_grad.setColorAt(0.0, QColor(248, 251, 255, top_a))
-                    drift_grad.setColorAt(0.55, QColor(216, 228, 244, top_a))
-                    drift_grad.setColorAt(1.0, QColor(156, 174, 198, min(230, int(round(90 + 135 * s_dep)))))
-                    cp.setBrush(drift_grad)
-                    cp.drawPath(drift_base)
+                    path_grad = QLinearGradient(
+                        QPointF(cx0, _meadow_surface_y(cx0, 0.75, cx0, turf_y, sc)),
+                        QPointF(cx0, turf_y + 14.0 * sc),
+                    )
+                    if snowy:
+                        path_grad.setColorAt(0.0, QColor(196, 212, 234, 155))
+                        path_grad.setColorAt(1.0, QColor(168, 188, 216, 185))
+                    elif wet:
+                        path_grad.setColorAt(0.0, QColor(64, 50, 38, 168))
+                        path_grad.setColorAt(1.0, QColor(44, 34, 24, 205))
+                    else:
+                        d_mul = 0.58 if segment == "night" else 1.0
+                        path_grad.setColorAt(0.0, QColor(int(136 * d_mul), int(108 * d_mul), int(76 * d_mul), 162))
+                        path_grad.setColorAt(1.0, QColor(int(108 * d_mul), int(82 * d_mul), int(56 * d_mul), 198))
+                    sp.setPen(QPen(QColor(24, 38, 22, 68), 1.4 * sc))
+                    sp.setBrush(path_grad)
+                    sp.drawPath(path_p)
 
-                    n_sp = max(12, int(round(44 * s_dep)))
-                    cp.setBrush(QColor(255, 255, 255, 215))
-                    for sp_i in range(n_sp):
-                        rel_x = ((sp_i * 61.7 + 17.0) % soil_world_w)
-                        wx = soil_world_x0 + rel_x
-                        rel = wx - core.left()
-                        dune = 0.48 + 0.34 * math.sin(rel * 0.021 + 0.5) + 0.18 * math.cos(rel * 0.053 - 0.8)
-                        dh = (2.2 + 16.5 * s_dep * dune) * min(1.0, s_dep * 1.4)
-                        dy_s = (_turf_y_at(wx) - dh * (0.25 + (sp_i % 5) * 0.14)) - crust_top
-                        cp.drawEllipse(QPointF(rel_x, dy_s), 0.9, 0.9)
-                cp.end()
-                _SOIL_CRUST_CACHE[crust_key] = crust_pm
+                # 3b) Pre-baked 620-blade 3D sloped under-turf carpet (0.00 ms/frame, eliminates any bare hillside gaps!)
+                turf_tuft_p0 = QPainterPath()
+                turf_tuft_p1 = QPainterPath()
+                n_static_tufts = 620
+                for ti in range(n_static_tufts):
+                    u_tx = ((ti * 0.61803398875) % 1.0)
+                    wx_t = soil_world_x0 + 8.0 + u_tx * (soil_world_w - 16.0)
+                    zt_i = 0.06 + (((ti * 37 + 11) % 97) / 97.0) * 0.88
+                    wy_t = _meadow_surface_y(wx_t, zt_i, cx0, turf_y, sc) + 1.5 * sc
+                    ps_t = 1.0 / (1.0 + 1.55 * zt_i)
+                    lean_t = _meadow_slope_lean(wx_t, zt_i, cx0, turf_y, sc) + (((ti * 17) % 9) - 4) * 0.032
+                    hlen_t = (13.0 + (ti % 5) * 4.2) * ps_t * sc
+                    dx_tip = math.sin(lean_t) * hlen_t
+                    dy_tip = math.cos(lean_t) * hlen_t
+                    tgt_p = turf_tuft_p0 if (ti & 1) == 0 else turf_tuft_p1
+                    tgt_p.moveTo(wx_t, wy_t)
+                    tgt_p.quadTo(wx_t + dx_tip * 0.45, wy_t - dy_tip * 0.55, wx_t + dx_tip, wy_t - dy_tip)
+                sp.setBrush(Qt.BrushStyle.NoBrush)
+                if snowy:
+                    sp.setPen(QPen(QColor(168, 192, 218, 118), 1.35 * sc, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    sp.drawPath(turf_tuft_p0)
+                    sp.setPen(QPen(QColor(238, 246, 255, 138), 1.15 * sc, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    sp.drawPath(turf_tuft_p1)
+                else:
+                    sp.setPen(QPen(c_mid_h.darker(116), 1.45 * sc, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    sp.drawPath(turf_tuft_p0)
+                    sp.setPen(QPen(c_crest.lighter(118), 1.15 * sc, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    sp.drawPath(turf_tuft_p1)
 
-            sp.drawPixmap(QPointF(soil_world_x0, crust_top), crust_pm)
-            sp.setBrush(Qt.BrushStyle.NoBrush)
-            crown_glow = QColor(mist_rgb[0], mist_rgb[1], mist_rgb[2], 78)
-            sp.setPen(QPen(crown_glow, 4.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            sp.drawPath(earth_ridge)
-            if rain_q > 0:
-                rv_stat = rain_q / 12.0
-                wet_sheen = QColor(168, 202, 232, int(round(76 * rv_stat)))
-                sp.setPen(QPen(wet_sheen, 2.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-                sp.drawPath(earth_ridge)
-                for px_u, pw in ((0.22, 34.0), (0.54, 42.0), (0.80, 30.0)):
-                    px_p = core.left() + core.width() * px_u
-                    py_p = _turf_y_at(px_p) + 1.4
-                    pg = QRadialGradient(QPointF(px_p, py_p), pw)
-                    pg.setColorAt(0.0, QColor(162, 198, 230, int(round(92 * rv_stat))))
-                    pg.setColorAt(0.6, QColor(82, 108, 134, int(round(56 * rv_stat))))
-                    pg.setColorAt(1.0, QColor(0, 0, 0, 0))
-                    sp.setPen(Qt.PenStyle.NoPen)
-                    sp.setBrush(pg)
-                    sp.drawEllipse(QPointF(px_p, py_p), pw, pw * 0.16)
-            sp.end()
-            _SOIL_BACKDROP_CACHE[soil_key] = soil_img
+                # 4) Progressive 3D hillside snow blanket over ~60s snowfall
+                if accum_q > 0:
+                    s_dep = accum_q / 10.0
+                    for z_dr, h_dr in ((0.82, 11.0), (0.46, 15.0)):
+                        dr_p = QPainterPath()
+                        for si in range(0, n_steps_h + 1, 2):
+                            wx = soil_world_x0 + min(soil_world_w, si * step_hx)
+                            dune = 0.50 + 0.32 * math.sin((wx - cx0) * 0.022 + z_dr * 5.0) + 0.18 * math.cos((wx - cx0) * 0.051)
+                            wy = _meadow_surface_y(wx, z_dr, cx0, turf_y, sc) - (h_dr * s_dep * dune) * sc
+                            if si == 0:
+                                dr_p.moveTo(wx, wy)
+                            else:
+                                dr_p.lineTo(wx, wy)
+                        for si in range(n_steps_h, -1, -2):
+                            wx = soil_world_x0 + min(soil_world_w, si * step_hx)
+                            wy = _meadow_surface_y(wx, max(0.0, z_dr - 0.28), cx0, turf_y, sc) + 6.0 * sc
+                            dr_p.lineTo(wx, wy)
+                        dr_p.closeSubpath()
+                        a_dr = min(238, int(round(115 + 120 * s_dep)))
+                        sp.setPen(Qt.PenStyle.NoPen)
+                        sp.setBrush(QColor(242, 248, 255, a_dr))
+                        sp.drawPath(dr_p)
 
-        p.drawImage(QPointF(soil_img_left, soil_img_top), soil_img)
-        if rain_vis > 0.08:
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            for ri in range(6):
-                rx = core.left() + core.width() * (0.11 + ri * 0.155)
-                ry = _turf_y_at(rx) - 1.2
-                prog = (phase_t * 1.05 + ri * 0.37) % 1.0
-                rad = 3.2 + prog * 15.5
-                ra = int((1.0 - prog) * 140 * rain_vis)
-                p.setPen(QPen(QColor(214, 236, 255, ra), 1.0))
-                p.drawEllipse(QPointF(rx, ry), rad, rad * 0.25)
+                # 5) Rainwater puddles nestled along 3D hillside hollows
+                if rain_q > 0:
+                    rv_stat = rain_q / 6.0
+                    for px_off, pz_u, pw in ((-165.0, 0.34, 34.0), (24.0, 0.22, 44.0), (185.0, 0.42, 32.0)):
+                        px_p = cx0 + px_off * sc
+                        py_p = _meadow_surface_y(px_p, pz_u, cx0, turf_y, sc)
+                        pg = QRadialGradient(QPointF(px_p, py_p), pw * sc)
+                        pg.setColorAt(0.0, QColor(168, 206, 238, int(round(98 * rv_stat))))
+                        pg.setColorAt(0.65, QColor(84, 114, 142, int(round(58 * rv_stat))))
+                        pg.setColorAt(1.0, QColor(0, 0, 0, 0))
+                        sp.setPen(Qt.PenStyle.NoPen)
+                        sp.setBrush(pg)
+                        sp.drawEllipse(QPointF(px_p, py_p), pw * sc, pw * 0.19 * sc)
 
-        # Full-height grass interaction zone across all visible blade heights (strictly inside island bottom!)
-        top_y = turf_y - 185.0
+                sp.restore()
+                # Sunlit / misty atmospheric rim along the 3D hill crest
+                sp.setBrush(Qt.BrushStyle.NoBrush)
+                sp.setPen(QPen(c_rim, 2.6 * sc, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                sp.drawPath(crest_line)
+                sp.end()
+                _SOIL_BACKDROP_CACHE[soil_key] = soil_img
+
+            p.drawImage(QPointF(soil_world_x0, crest_min_y), soil_img)
+
+        # Full-slope 3D grass interaction zone (covers entire sloped hillside + off-screen stretch!)
+        top_y = turf_y - 215.0 * sc
         has_cursor = (
             cursor_local is not None
-            and eff_left <= cursor_local.x() <= (eff_left + eff_width)
-            and top_y <= cursor_local.y() <= (turf_y + 8.0)
+            and (eff_left - 16.0) <= cursor_local.x() <= (eff_right + 16.0)
+            and top_y <= cursor_local.y() <= (soil_bottom + 8.0)
         )
         vert_inf = 0.0
         if has_cursor and cursor_local is not None:
             t_vert = max(0.0, min(1.0, (cursor_local.y() - top_y) / max(1.0, turf_y - top_y)))
-            vert_inf = 0.72 + 0.38 * (t_vert ** 0.65)
+            vert_inf = 0.78 + 0.34 * (t_vert ** 0.55)
 
-        # Realistic natural botanical tones (back occluded -> rich mid meadow -> sunlit/wet/frosted front)
+        # Botanical tones seamlessly matched to the 3D hillside turf (zero dark root triangles!)
         if wet:
-            back_c, mid_c, tip_c = QColor(24, 42, 22, 242), QColor(54, 82, 44, 232), QColor(148, 178, 128, 218)
+            back_c, mid_c, tip_c = QColor(24, 62, 36, 236), QColor(44, 96, 52, 236), QColor(136, 186, 122, 224)
             sheen = QColor(232, 246, 242, 195)
         elif snowy:
             frost = min(1.0, 0.25 + snow_accum * 0.75)
-            back_c = QColor(56, 62, 54, 228)
-            mid_c = QColor(round(108 + 26 * frost), round(114 + 24 * frost), round(102 + 28 * frost), 218)
-            tip_c = QColor(round(205 + 42 * frost), round(212 + 38 * frost), round(210 + 44 * frost), 210)
+            back_c = QColor(126, 146, 166, 226)
+            mid_c = QColor(round(154 + 28 * frost), round(172 + 26 * frost), round(188 + 26 * frost), 224)
+            tip_c = QColor(round(220 + 30 * frost), round(230 + 22 * frost), round(240 + 15 * frost), 218)
             sheen = QColor(246, 248, 252, 185)
         elif segment in ("sunrise", "sunset"):
-            back_c, mid_c, tip_c = QColor(58, 52, 32, 232), QColor(124, 106, 64, 220), QColor(230, 192, 136, 200)
+            back_c, mid_c, tip_c = QColor(48, 84, 38, 236), QColor(112, 122, 58, 228), QColor(228, 194, 124, 212)
             sheen = QColor(250, 218, 168, 150)
         elif segment == "night":
-            back_c, mid_c, tip_c = QColor(34, 38, 28, 230), QColor(72, 78, 58, 216), QColor(138, 142, 114, 185)
+            back_c, mid_c, tip_c = QColor(18, 46, 32, 236), QColor(42, 78, 54, 226), QColor(108, 146, 108, 198)
             sheen = QColor(202, 210, 204, 120)
         else:
-            back_c, mid_c, tip_c = QColor(48, 58, 34, 232), QColor(102, 112, 70, 224), QColor(198, 196, 146, 206)
-            sheen = QColor(238, 230, 192, 140)
+            back_c, mid_c, tip_c = QColor(38, 98, 44, 238), QColor(74, 138, 62, 232), QColor(174, 208, 118, 218)
+            sheen = QColor(232, 242, 182, 142)
 
-        # Ultra-dense 2D meadow blades with early calm-cache short-circuit (skips grass_sim.step() when calm!)
-        grass_left = core.left() - 36.0
-        grass_width = max(120.0, core.width() + 72.0)
+        # Canonical full-width grass simulation (identical lush density across center AND off-screen liquid stretch!)
+        grass_pad = max(255.0, (eff_width - core.width()) * 0.5 + 48.0)
+        grass_half = max(585.0, core.width() * 0.5 + grass_pad)
+        grass_left = cx0 - grass_half
+        grass_width = grass_half * 2.0
         q_g = max(0.25, min(1.0, float(quality)))
-        n_blades = max(88, int(round(max(210.0, grass_width / 2.45) * q_g)))
+        n_blades = max(110, int(round((grass_width / 3.35) * q_g)))
         root_y = turf_y + 4.0
         has_music = music_energy > 0.02
         n_mb = len(music_bands) if music_bands else 0
         px_cm = _px_per_cm()
-        max_cm_px = px_cm * 6.98
+        max_cm_px = px_cm * 5.20
 
-        can_x0 = min(grass_left - 24.0, eff_left - 8.0)
-        can_x1 = max(grass_left + grass_width + 24.0, eff_right + 8.0)
-        can_y0 = turf_y - max_cm_px - 16.0
+        can_x0 = grass_left - 22.0
+        can_x1 = grass_left + grass_width + 22.0
+        can_y0 = turf_y - 122.0 * sc - max_cm_px - 18.0
         can_w = max(120, int(math.ceil(can_x1 - can_x0)))
-        can_h = max(48, int(math.ceil(max_cm_px + 34.0)))
+        can_h = max(64, int(math.ceil((soil_bottom + 14.0) - can_y0)))
+
         can_calm = (
             grass_sim is not None
             and not grass_sim._settling
@@ -3555,26 +3995,76 @@ class AtmosphericScenePainter:
             can_w,
             can_h,
             n_blades,
-            int(round(eff_left - core.left())),
-            int(round(eff_right - core.left())),
             bool(wet),
             bool(snowy),
             segment,
-            round(snow_accum * 24.0),
+            round(snow_accum * 10.0),
             round(core.top()),
             round(core.bottom()),
-            round(core.left()),
+            round(cx0),
+        )
+        target_cache_img = (
+            grass_sim._canopy_back_img
+            if (grass_sim is not None and z_mode == "back")
+            else (grass_sim._canopy_img if grass_sim is not None else None)
         )
         if (
             can_calm
             and grass_sim is not None
-            and grass_sim._canopy_img is not None
+            and target_cache_img is not None
             and grass_sim._canopy_key == can_key
-            and abs(phase_t - grass_sim._canopy_phase) < 0.085
+            and abs(phase_t - grass_sim._canopy_phase) < 0.088
         ):
-            p.drawImage(QPointF(can_x0, can_y0), grass_sim._canopy_img)
+            p.drawImage(QPointF(can_x0, can_y0), target_cache_img)
+        elif z_mode == "front" and grass_sim is not None and grass_sim._pending_front is not None and grass_sim._pending_front[0] == round(phase_t, 5):
+            # Fast-path: "back" pass already built & binned the "front" blades in the same frame!
+            _, draw_front_fn = grass_sim._pending_front
+            grass_sim._pending_front = None
+            if can_calm:
+                dpr_c = max(1.0, float(p.device().devicePixelRatioF())) if p.device() is not None else 1.0
+                pw = max(1, int(round(can_w * dpr_c)))
+                ph = max(1, int(round(can_h * dpr_c)))
+                c_img = grass_sim._canopy_img
+                if c_img is None or c_img.width() != pw or c_img.height() != ph or abs(c_img.devicePixelRatio() - dpr_c) > 0.01:
+                    c_img = QImage(pw, ph, QImage.Format.Format_ARGB32_Premultiplied)
+                    c_img.setDevicePixelRatio(dpr_c)
+                    grass_sim._canopy_img = c_img
+                c_img.fill(0)
+                cp = QPainter(c_img)
+                cp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                cp.translate(-can_x0, -can_y0)
+                draw_front_fn(cp)
+                cp.end()
+                grass_sim._canopy_key = can_key
+                grass_sim._canopy_phase = phase_t
+                p.drawImage(QPointF(can_x0, can_y0), c_img)
+            else:
+                draw_front_fn(p)
         else:
+            vis_x0 = (can_x0 if can_calm else eff_left) - 22.0
+            vis_x1 = (can_x1 if can_calm else eff_right) + 22.0
+
             if grass_sim is not None:
+                grass_sim.ensure_blades(n_blades)
+                geom_key = (n_blades, round(cx0, 1), round(turf_y, 1), round(sc, 3), round(grass_left, 1), round(grass_width, 1))
+                g_cache = grass_sim._geom_cache
+                if g_cache is None or g_cache[0] != geom_key:
+                    z_ds = grass_sim.z_depths
+                    x_js = grass_sim.x_jits
+                    inv_nb = 1.0 / max(1, n_blades)
+                    b_roots: list[float] = []
+                    p_scales: list[float] = []
+                    s_leans: list[float] = []
+                    for bi in range(n_blades):
+                        bx_i = grass_left + (bi + 0.5) * inv_nb * grass_width + x_js[bi]
+                        zd_i = z_ds[bi]
+                        b_roots.append(_meadow_surface_y(bx_i, zd_i, cx0, turf_y, sc))
+                        p_scales.append(1.0 / (1.0 + 1.48 * zd_i))
+                        s_leans.append(_meadow_slope_lean(bx_i, zd_i, cx0, turf_y, sc))
+                    g_cache = (geom_key, b_roots, p_scales, s_leans)
+                    grass_sim._geom_cache = g_cache
+                _, b_roots, p_scales, s_leans = g_cache
+
                 blade_states = grass_sim.step(
                     n_blades,
                     grass_left,
@@ -3587,231 +4077,284 @@ class AtmosphericScenePainter:
                     has_cursor,
                     music_energy,
                     music_bands,
+                    vis_range=(vis_x0, vis_x1),
+                    blade_root_ys=b_roots,
                 )
                 w_scales = grass_sim.w_scales
                 shade_indices = grass_sim.shade_indices
+                z_depths = grass_sim.z_depths
             else:
                 blade_states = []
                 w_scales = []
                 shade_indices = []
-                part_radius = 48.0
-                wind_rad_amp = 0.088 if wet else 0.056
+                z_depths = []
+                b_roots = []
+                p_scales = []
+                s_leans = []
+                part_radius = 52.0
+                wind_rad_amp = 0.095 if wet else 0.062
                 rng_st = random.Random(7331)
+                inv_nb = 1.0 / max(1, n_blades)
                 for i in range(n_blades):
-                    frac = (i + 0.5) / n_blades
-                    bx = grass_left + frac * grass_width + rng_st.uniform(-2.8, 2.8)
+                    frac = (i + 0.5) * inv_nb
+                    bx = grass_left + frac * grass_width + rng_st.uniform(-3.2, 3.2)
                     tier = rng_st.random()
-                    cm_len = rng_st.uniform(0.85, 2.35) if tier < 0.35 else (rng_st.uniform(2.35, 4.75) if tier < 0.76 else rng_st.uniform(4.85, 6.92))
+                    cm_len = rng_st.uniform(1.05, 2.25) if tier < 0.32 else (rng_st.uniform(2.25, 3.75) if tier < 0.74 else rng_st.uniform(3.75, 4.95))
+                    zd = rng_st.uniform(0.56, 0.90) if (i % 10 < 2) else (rng_st.uniform(0.20, 0.56) if (i % 10 < 5) else rng_st.uniform(0.0, 0.20))
+                    by_r = _meadow_surface_y(bx, zd, cx0, turf_y, sc)
+                    p_sc = 1.0 / (1.0 + 1.48 * zd)
+                    s_ln = _meadow_slope_lean(bx, zd, cx0, turf_y, sc)
                     band_v = float(music_bands[min(n_mb - 1, int(frac * n_mb))]) if (has_music and n_mb > 0) else music_energy
                     music_h = (1.0 + 0.10 * music_energy + 0.16 * band_v) if has_music else 1.0
-                    bh = min(max_cm_px, max(16.0, cm_len * px_cm) * (1.06 if wet else 1.0) * music_h)
-                    wind_rad = math.sin(phase_t * (2.05 if wet else 1.32) + i * 0.43) * wind_rad_amp
-                    if has_music:
-                        wind_rad += math.sin(phase_t * 3.8 + i * 0.55) * (0.036 + 0.09 * band_v + 0.048 * music_energy)
-                    ang = rng_st.uniform(-0.14, 0.14) + wind_rad
+                    bh = min(max_cm_px, max(18.0, cm_len * px_cm) * (1.06 if wet else 1.0) * music_h)
+                    wind_rad = math.sin(phase_t * (2.05 if wet else 1.35) - bx * 0.011 - zd * 2.5 + i * 0.37) * wind_rad_amp
+                    ang = rng_st.uniform(-0.13, 0.13) + wind_rad
                     crl = wind_rad * 0.55
                     if has_cursor and vert_inf > 0.02 and cursor_local is not None:
                         dx = bx - cursor_local.x()
                         adx = abs(dx)
-                        if adx < part_radius:
+                        if adx < part_radius and (by_r - bh * p_sc - 20.0) <= cursor_local.y() <= (by_r + 16.0):
                             bell = 0.5 * (1.0 + math.cos(math.pi * adx / part_radius)) * vert_inf
-                            side = (1.0 if dx >= 0.0 else -1.0) if adx > 3.5 else (1.0 if (i % 2 == 0) else -1.0)
-                            hit_frac = max(0.18, min(1.0, (root_y - cursor_local.y()) / max(20.0, bh)))
-                            ang += side * bell * (0.62 + 0.34 * (1.0 - hit_frac * 0.40))
-                            crl += side * bell * (0.36 + 0.48 * hit_frac)
+                            side = (1.0 if dx >= 0.0 else -1.0) if adx > 3.5 else (1.0 if (i & 1) == 0 else -1.0)
+                            ang += side * bell * 0.85
+                            crl += side * bell * 0.55
                     blade_states.append((bx, bh, max(-1.38, min(1.38, ang)), max(-1.26, min(1.26, crl))))
-                    w_scales.append(rng_st.uniform(0.60, 1.30))
-                    shade_indices.append(i % 6)
+                    w_scales.append(rng_st.uniform(0.76, 1.42))
+                    shade_indices.append(0 if zd >= 0.65 else (2 if zd >= 0.30 else (4 + (i & 1))))
+                    z_depths.append(zd)
+                    b_roots.append(by_r)
+                    p_scales.append(p_sc)
+                    s_leans.append(s_ln)
 
-            has_bulge_ext = bool(
-                outer_rect is not None
-                and (outer_rect.left() < grass_left + 4.0 or outer_rect.right() > grass_left + grass_width - 4.0)
-            )
-            if has_bulge_ext and outer_rect is not None:
-                blade_states = list(blade_states)
-                w_scales = list(w_scales)
-                shade_indices = list(shade_indices)
-                ext_step = 5.2
-                ext_points: list[tuple[float, int]] = []
-                if outer_rect.left() < grass_left + 4.0:
-                    k_lo = math.floor((outer_rect.left() - 12.0 - grass_left) / ext_step)
-                    for k in range(k_lo, 0):
-                        ext_points.append((grass_left + k * ext_step, abs(k * 131 + 17)))
-                if outer_rect.right() > grass_left + grass_width - 4.0:
-                    k_hi = math.ceil((outer_rect.right() + 12.0 - (grass_left + grass_width)) / ext_step)
-                    right_base = grass_left + grass_width
-                    for k in range(1, k_hi + 1):
-                        ext_points.append((right_base + k * ext_step, abs(k * 131 + 53)))
-                for bx, seed_v in ext_points:
-                    r01 = ((seed_v * 1103515245 + 12345) & 0x7FFF) / 32767.0
-                    r02 = ((seed_v * 214013 + 2531011) & 0x7FFF) / 32767.0
-                    if r01 < 0.35:
-                        cm_len = 0.85 + r02 * 1.50
-                    elif r01 < 0.76:
-                        cm_len = 2.35 + r02 * 2.40
-                    else:
-                        cm_len = 4.85 + r02 * 2.07
-                    bh = min(max_cm_px, max(16.0, cm_len * px_cm) * (1.06 if wet else 1.0))
-                    w_rad = math.sin(phase_t * (2.05 if wet else 1.32) + seed_v * 0.43) * (0.088 if wet else 0.056)
-                    ang = ((seed_v % 9) - 4) * 0.032 + w_rad
-                    crl = w_rad * 0.55
-                    if has_cursor and vert_inf > 0.02 and cursor_local is not None:
-                        dx_c = bx - cursor_local.x()
-                        adx_c = abs(dx_c)
-                        if adx_c < 48.0:
-                            bell_e = 0.5 * (1.0 + math.cos(math.pi * adx_c / 48.0)) * vert_inf
-                            push_dir = (1.0 if dx_c >= 0.0 else -1.0) if adx_c > 3.5 else (1.0 if (seed_v % 2 == 0) else -1.0)
-                            hit_f = max(0.18, min(1.0, (root_y - cursor_local.y()) / max(20.0, bh)))
-                            ang += push_dir * bell_e * (1.05 + 0.44 * (1.0 - hit_f * 0.45))
-                            crl += push_dir * bell_e * (0.52 + 0.54 * hit_f)
-                    blade_states.append((bx, bh, max(-1.38, min(1.38, ang)), max(-1.26, min(1.26, crl))))
-                    w_scales.append(0.60 + r02 * 0.70)
-                    shade_indices.append(seed_v % 6)
             can_calm = (
                 grass_sim is not None
                 and not grass_sim._settling
                 and not (has_cursor and vert_inf > 0.01)
                 and not has_music
             )
+
             canopy_grads: list[QLinearGradient] = []
-            top_y_g = turf_y - max_cm_px
-            root_y_g = turf_y + 4.0
+            grad_top = turf_y - 104.0 * sc - max_cm_px * 0.72
+            grad_bot = turf_y + 12.0 * sc
             for g_idx in range(6):
-                g_col = QLinearGradient(QPointF(core.left(), root_y_g), QPointF(core.left(), top_y_g))
+                g_col = QLinearGradient(QPointF(cx0, grad_bot), QPointF(cx0, grad_top))
                 if g_idx < 2:
-                    root_col = QColor(max(0, back_c.red() - 18), max(0, back_c.green() - 18), max(0, back_c.blue() - 14), 238)
-                    mid_col = QColor(back_c.red(), back_c.green(), back_c.blue(), 220)
-                    up_col = QColor(mid_c.red(), mid_c.green(), mid_c.blue(), 196)
+                    root_col = QColor(back_c.red(), back_c.green(), back_c.blue(), 226)
+                    mid_col = QColor(
+                        min(255, round(back_c.red() * 0.55 + mid_c.red() * 0.45)),
+                        min(255, round(back_c.green() * 0.55 + mid_c.green() * 0.45)),
+                        min(255, round(back_c.blue() * 0.55 + mid_c.blue() * 0.45)),
+                        224,
+                    )
+                    up_col = QColor(mid_c.red(), mid_c.green(), mid_c.blue(), 208)
                 elif g_idx < 4:
-                    root_col = QColor(max(0, back_c.red() - 12), max(0, back_c.green() - 12), max(0, back_c.blue() - 10), 236)
+                    root_col = QColor(back_c.red(), back_c.green(), back_c.blue(), 234)
                     mid_col = mid_c
                     up_col = QColor(
-                        min(255, round(mid_c.red() * 0.35 + tip_c.red() * 0.65)),
-                        min(255, round(mid_c.green() * 0.35 + tip_c.green() * 0.65)),
-                        min(255, round(mid_c.blue() * 0.35 + tip_c.blue() * 0.65)),
-                        210,
+                        min(255, round(mid_c.red() * 0.30 + tip_c.red() * 0.70)),
+                        min(255, round(mid_c.green() * 0.30 + tip_c.green() * 0.70)),
+                        min(255, round(mid_c.blue() * 0.30 + tip_c.blue() * 0.70)),
+                        218,
                     )
                 else:
-                    root_col = QColor(back_c.red(), back_c.green(), back_c.blue(), 230)
-                    mid_col = QColor(min(255, mid_c.red() + 14), min(255, mid_c.green() + 12), min(255, mid_c.blue() + 8), 222)
+                    root_col = QColor(
+                        min(255, round(back_c.red() * 0.75 + mid_c.red() * 0.25)),
+                        min(255, round(back_c.green() * 0.75 + mid_c.green() * 0.25)),
+                        min(255, round(back_c.blue() * 0.75 + mid_c.blue() * 0.25)),
+                        238,
+                    )
+                    mid_col = QColor(min(255, mid_c.red() + 14), min(255, mid_c.green() + 14), min(255, mid_c.blue() + 8), 232)
                     up_col = tip_c
                 g_col.setColorAt(0.0, root_col)
-                g_col.setColorAt(0.42, mid_col)
+                g_col.setColorAt(0.45, mid_col)
                 g_col.setColorAt(1.0, up_col)
                 canopy_grads.append(g_col)
 
             rib_col = QColor(sheen.red(), sheen.green(), sheen.blue(), 128 if wet else 54)
-            # Store compact tuples & draw with one reused QPainterPath + single merged rib_path
-            shade_buckets: list[list[tuple[float, float, float, float, float, float, float, float, float, float]]] = [[] for _ in range(6)]
+            n_bins = 6
+            split_passes = (z_mode == "back" and grass_sim is not None)
+
+            back_bins = [[QPainterPath() for _ in range(n_bins)] for _ in range(6)]
+            back_max_x = [[-1e9] * n_bins for _ in range(6)]
+            back_used = [[False] * n_bins for _ in range(6)]
+            back_ov: list[list[tuple[float, float, float, float, float, float, float, float, float, float]]] = [[] for _ in range(6)]
+
+            front_bins = [[QPainterPath() for _ in range(n_bins)] for _ in range(6)] if split_passes else back_bins
+            front_max_x = [[-1e9] * n_bins for _ in range(6)] if split_passes else back_max_x
+            front_used = [[False] * n_bins for _ in range(6)] if split_passes else back_used
+            front_ov: list[list[tuple[float, float, float, float, float, float, float, float, float, float]]] = [[] for _ in range(6)] if split_passes else back_ov
+
             rib_path = QPainterPath()
             has_ribs = False
             dew_glints: list[tuple[float, float, float]] = []
 
-            m_cos = math.cos
+            hw0_base = 3.45 * sc
+            hw2_base = 1.62 * sc
+            only_front = z_mode == "front"
             m_sin = math.sin
-            hw0_base = 3.05
-            hw2_base = 1.48
-            has_w = bool(w_scales)
-            has_sh = bool(shade_indices)
-            for i, (bx, bh, ang, crl) in enumerate(blade_states):
-                ws = w_scales[i] if has_w else 1.0
-                sh_i = shade_indices[i] if has_sh else (i % 6)
-                by_root = _turf_y_at(bx) + 1.8
-                floor_y = by_root - 1.5
-                th0 = ang * 0.42 + crl * 0.08
+
+            for i, (bx, bh_raw, ang_sim, crl) in enumerate(blade_states):
+                if bx < vis_x0 or bx > vis_x1:
+                    continue
+                zd = z_depths[i]
+                if only_front and zd >= 0.56:
+                    continue
+
+                is_back_b = zd >= 0.56
+                t_bins = back_bins if (is_back_b or not split_passes) else front_bins
+                t_max = back_max_x if (is_back_b or not split_passes) else front_max_x
+                t_used = back_used if (is_back_b or not split_passes) else front_used
+                t_ov = back_ov if (is_back_b or not split_passes) else front_ov
+
+                p_sc = p_scales[i]
+                bh = bh_raw * p_sc * sc
+                ws = w_scales[i] * (0.56 + 0.44 * p_sc)
+                sh_i = shade_indices[i]
+                by_root = b_roots[i] + 2.0 * sc
+                floor_y = by_root - 1.2
+                ang = ang_sim + s_leans[i]
+                if ang < -1.48:
+                    ang = -1.48
+                elif ang > 1.48:
+                    ang = 1.48
+
+                th0 = ang * 0.44 + crl * 0.08
                 th1 = ang * 0.78 + crl * 0.36
-                th2 = ang * 1.06 + crl * 0.78
-                th3 = ang * 1.24 + crl * 1.18
+                th2 = ang * 1.05 + crl * 0.76
+                th3 = ang * 1.22 + crl * 1.14
+
+                t2 = th0 * th0
+                sn0 = th0 * (1.0 - t2 * (0.16666 - t2 * 0.00831))
+                cs0 = 1.0 - t2 * (0.5 - t2 * 0.0416)
+
+                t2 = th1 * th1
+                sn1 = th1 * (1.0 - t2 * (0.16666 - t2 * 0.00831))
+                cs1 = 1.0 - t2 * (0.5 - t2 * 0.0416)
+
+                t2 = th2 * th2
+                sn2 = th2 * (1.0 - t2 * (0.16666 - t2 * 0.00831))
+                cs2 = 1.0 - t2 * (0.5 - t2 * 0.0416)
+
+                t2 = th3 * th3
+                sn3 = th3 * (1.0 - t2 * (0.16666 - t2 * 0.00831))
+                cs3 = 1.0 - t2 * (0.5 - t2 * 0.0416)
+
                 s0 = bh * 0.24
                 s1 = bh * 0.27
                 s3 = bh * 0.22
-                c1x = bx + s0 * m_sin(th0)
-                y_raw = by_root - s0 * m_cos(th0)
+                c1x = bx + s0 * sn0
+                y_raw = by_root - s0 * cs0
                 c1y = floor_y if y_raw > floor_y else y_raw
-                j2x = c1x + s1 * m_sin(th1)
-                y_raw = c1y - s1 * m_cos(th1)
+                j2x = c1x + s1 * sn1
+                y_raw = c1y - s1 * cs1
                 j2y = floor_y if y_raw > floor_y else y_raw
-                j3x = j2x + s1 * m_sin(th2)
-                y_raw = j2y - s1 * m_cos(th2)
+                j3x = j2x + s1 * sn2
+                y_raw = j2y - s1 * cs2
                 j3y = floor_y if y_raw > floor_y else y_raw
-                tx = j3x + s3 * m_sin(th3)
-                y_raw = j3y - s3 * m_cos(th3)
+                tx = j3x + s3 * sn3
+                y_raw = j3y - s3 * cs3
                 ty = floor_y if y_raw > floor_y else y_raw
 
-                j0x, j0y = bx, by_root
                 hw0 = hw0_base * ws
-                n0x, n0y = m_cos(th0) * hw0, m_sin(th0) * hw0
-                l0x, l0y = j0x - n0x, j0y - n0y
-                r0x, r0y = j0x + n0x, j0y + n0y
+                n0x, n0y = cs0 * hw0, sn0 * hw0
+                l0x, l0y = bx - n0x, by_root - n0y
+                r0x, r0y = bx + n0x, by_root + n0y
 
                 hw2 = hw2_base * ws
-                n2x, n2y = m_cos(th1) * hw2, m_sin(th1) * hw2
+                n2x, n2y = cs1 * hw2, sn1 * hw2
                 l2x, l2y = j2x - n2x, j2y - n2y
                 r2x, r2y = j2x + n2x, j2y + n2y
 
-                shade_buckets[sh_i].append((
-                    l0x,
-                    l0y,
-                    2.0 * l2x - 0.5 * (l0x + tx),
-                    2.0 * l2y - 0.5 * (l0y + ty),
-                    tx,
-                    ty,
-                    2.0 * r2x - 0.5 * (r0x + tx),
-                    2.0 * r2y - 0.5 * (r0y + ty),
-                    r0x,
-                    r0y,
-                ))
+                cx1 = 2.0 * l2x - 0.5 * (l0x + tx)
+                cy1 = 2.0 * l2y - 0.5 * (l0y + ty)
+                cx2 = 2.0 * r2x - 0.5 * (r0x + tx)
+                cy2 = 2.0 * r2y - 0.5 * (r0y + ty)
 
-                if bh > 52.0 and sh_i >= 3:
-                    rib_path.moveTo(j0x, j0y - 1.0)
+                b_min_x = l0x if l0x < tx else tx
+                if cx1 < b_min_x:
+                    b_min_x = cx1
+                b_max_x = r0x if r0x > tx else tx
+                if cx2 > b_max_x:
+                    b_max_x = cx2
+
+                b_max_list = t_max[sh_i]
+                placed = False
+                for b_idx in range(n_bins):
+                    if b_min_x > b_max_list[b_idx] + 0.4:
+                        bp_p = t_bins[sh_i][b_idx]
+                        bp_p.moveTo(l0x, l0y)
+                        bp_p.quadTo(cx1, cy1, tx, ty)
+                        bp_p.quadTo(cx2, cy2, r0x, r0y)
+                        bp_p.closeSubpath()
+                        b_max_list[b_idx] = b_max_x
+                        t_used[sh_i][b_idx] = True
+                        placed = True
+                        break
+                if not placed:
+                    t_ov[sh_i].append((l0x, l0y, cx1, cy1, tx, ty, cx2, cy2, r0x, r0y))
+
+                if not is_back_b and bh > 46.0 * sc and sh_i >= 3:
+                    rib_path.moveTo(bx, by_root - 1.0)
                     rib_path.quadTo(j2x, j2y, tx, ty)
                     has_ribs = True
 
-                if wet and bh > 36.0 and sh_i >= 3 and (i % 4 == 0):
+                if not is_back_b and wet and bh > 32.0 * sc and sh_i >= 3 and (i & 3) == 0:
                     shimmer = 0.5 + 0.5 * m_sin(phase_t * 2.8 + i * 1.7)
                     if shimmer > 0.25:
-                        gx_d, gy_d = (j3x, j3y) if (i % 2 == 0) else (j2x, j2y)
+                        gx_d, gy_d = (j3x, j3y) if (i & 1) == 0 else (j2x, j2y)
                         dew_glints.append((gx_d, gy_d, 0.70 + 0.45 * shimmer))
 
-            def _draw_canopy(cp: QPainter) -> None:
-                cp.setPen(Qt.PenStyle.NoPen)
-                cp_draw = cp.drawPath
-                fp = QPainterPath()
-                fp_clear = fp.clear
-                fp_move = fp.moveTo
-                fp_quad = fp.quadTo
-                fp_close = fp.closeSubpath
-                for sh_i in range(6):
-                    bucket = shade_buckets[sh_i]
-                    if not bucket:
-                        continue
-                    cp.setBrush(canopy_grads[sh_i])
-                    for l0x, l0y, cx1, cy1, tx_b, ty_b, cx2, cy2, r0x, r0y in bucket:
-                        fp_clear()
-                        fp_move(l0x, l0y)
-                        fp_quad(cx1, cy1, tx_b, ty_b)
-                        fp_quad(cx2, cy2, r0x, r0y)
-                        fp_close()
-                        cp_draw(fp)
-                if has_ribs:
-                    cp.setBrush(Qt.BrushStyle.NoBrush)
-                    cp.setPen(QPen(rib_col, 0.85 if wet else 0.56))
-                    cp_draw(rib_path)
-                if dew_glints:
+            def _make_drawer(
+                bins_arg: list[list[QPainterPath]],
+                used_arg: list[list[bool]],
+                ov_arg: list[list[tuple[float, float, float, float, float, float, float, float, float, float]]],
+                with_fg_fx: bool,
+            ):
+                def _draw_fn(cp: QPainter) -> None:
                     cp.setPen(Qt.PenStyle.NoPen)
-                    drop_alpha = int(round(190 * max(0.45, rain_vis)))
-                    cp.setBrush(QColor(186, 226, 255, int(round(drop_alpha * 0.55))))
-                    for gx, gy, gr in dew_glints:
-                        cp.drawEllipse(QPointF(gx, gy), gr * 1.45, gr * 1.65)
-                    cp.setBrush(QColor(246, 252, 255, drop_alpha))
-                    for gx, gy, gr in dew_glints:
-                        cp.drawEllipse(QPointF(gx - gr * 0.32, gy - gr * 0.35), gr * 0.52, gr * 0.52)
+                    cp_draw = cp.drawPath
+                    fp_ov = QPainterPath()
+                    for sh_i in range(6):
+                        used_flags = used_arg[sh_i]
+                        ov_list = ov_arg[sh_i]
+                        if not any(used_flags) and not ov_list:
+                            continue
+                        cp.setBrush(canopy_grads[sh_i])
+                        s_bins = bins_arg[sh_i]
+                        for b_idx in range(n_bins):
+                            if used_flags[b_idx]:
+                                cp_draw(s_bins[b_idx])
+                        for l0x, l0y, cx1, cy1, tx_b, ty_b, cx2, cy2, r0x, r0y in ov_list:
+                            fp_ov.clear()
+                            fp_ov.moveTo(l0x, l0y)
+                            fp_ov.quadTo(cx1, cy1, tx_b, ty_b)
+                            fp_ov.quadTo(cx2, cy2, r0x, r0y)
+                            fp_ov.closeSubpath()
+                            cp_draw(fp_ov)
+                    if with_fg_fx and has_ribs:
+                        cp.setBrush(Qt.BrushStyle.NoBrush)
+                        cp.setPen(QPen(rib_col, 0.85 if wet else 0.56))
+                        cp_draw(rib_path)
+                    if with_fg_fx and dew_glints:
+                        cp.setPen(Qt.PenStyle.NoPen)
+                        drop_alpha = int(round(190 * max(0.45, rain_vis)))
+                        cp.setBrush(QColor(186, 226, 255, int(round(drop_alpha * 0.55))))
+                        for gx, gy, gr in dew_glints:
+                            cp.drawEllipse(QPointF(gx, gy), gr * 1.45, gr * 1.65)
+                        cp.setBrush(QColor(246, 252, 255, drop_alpha))
+                        for gx, gy, gr in dew_glints:
+                            cp.drawEllipse(QPointF(gx - gr * 0.32, gy - gr * 0.35), gr * 0.52, gr * 0.52)
+                return _draw_fn
+
+            draw_cur = _make_drawer(back_bins, back_used, back_ov, with_fg_fx=(not split_passes))
+            if split_passes and grass_sim is not None:
+                grass_sim._pending_front = (round(phase_t, 5), _make_drawer(front_bins, front_used, front_ov, with_fg_fx=True))
 
             if can_calm and grass_sim is not None:
                 dpr_c = max(1.0, float(p.device().devicePixelRatioF())) if p.device() is not None else 1.0
                 pw = max(1, int(round(can_w * dpr_c)))
                 ph = max(1, int(round(can_h * dpr_c)))
-                c_img = grass_sim._canopy_img
+                c_img = grass_sim._canopy_back_img if z_mode == "back" else grass_sim._canopy_img
                 if (
                     c_img is None
                     or c_img.width() != pw
@@ -3820,44 +4363,57 @@ class AtmosphericScenePainter:
                 ):
                     c_img = QImage(pw, ph, QImage.Format.Format_ARGB32_Premultiplied)
                     c_img.setDevicePixelRatio(dpr_c)
-                    grass_sim._canopy_img = c_img
+                    if z_mode == "back":
+                        grass_sim._canopy_back_img = c_img
+                    else:
+                        grass_sim._canopy_img = c_img
                 c_img.fill(0)
                 cp = QPainter(c_img)
                 cp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 cp.translate(-can_x0, -can_y0)
-                _draw_canopy(cp)
+                draw_cur(cp)
                 cp.end()
-                grass_sim._canopy_key = can_key
-                grass_sim._canopy_phase = phase_t
+                if z_mode in ("all", "front"):
+                    grass_sim._canopy_key = can_key
+                    grass_sim._canopy_phase = phase_t
                 p.drawImage(QPointF(can_x0, can_y0), c_img)
             else:
-                _draw_canopy(p)
+                draw_cur(p)
 
-        # Foreground pillowed snowdrift rim partially blanketing base of stalks after prolonged snow (2x deep drifts)
-        if snow_accum > 0.12:
-            fg_drift = QPainterPath()
-            bot_d = turf_y + 14.0
-            fg_drift.moveTo(eff_left, bot_d)
-            for si_x in range(k_start, k_end + 1):
-                wx = core.left() + si_x * step_px
-                rel = wx - core.left()
-                ridge = (
-                    0.45
-                    + 0.35 * math.cos(rel * 0.026 - 0.7)
-                    + 0.20 * math.sin(rel * 0.061 + 0.3)
-                )
-                dy_f = _turf_y_at(wx) - (1.0 + 19.0 * snow_accum * ridge)
-                fg_drift.lineTo(wx, dy_f)
-            fg_drift.lineTo(eff_right, bot_d)
-            fg_drift.closeSubpath()
-            fg_grad = QLinearGradient(QPointF(core.left(), turf_y - 22.0), QPointF(core.left(), bot_d))
-            fg_a = min(240, int(round(75 + 165 * snow_accum)))
-            fg_grad.setColorAt(0.0, QColor(248, 251, 255, fg_a))
-            fg_grad.setColorAt(0.55, QColor(224, 234, 246, fg_a))
-            fg_grad.setColorAt(1.0, QColor(178, 194, 216, int(fg_a * 0.85)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(fg_grad)
-            p.drawPath(fg_drift)
+        if z_mode in ("all", "front"):
+            if rain_vis > 0.08:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                for ri, (rx_off, rz_u) in enumerate(((-185.0, 0.36), (-85.0, 0.18), (18.0, 0.24), (112.0, 0.14), (195.0, 0.42))):
+                    rx = cx0 + rx_off * sc
+                    ry = _meadow_surface_y(rx, rz_u, cx0, turf_y, sc)
+                    prog = (phase_t * 1.05 + ri * 0.37) % 1.0
+                    rad = (3.0 + prog * 14.5) * sc * (1.0 - 0.35 * rz_u)
+                    ra = int((1.0 - prog) * 140 * rain_vis)
+                    p.setPen(QPen(QColor(214, 236, 255, ra), 1.0))
+                    p.drawEllipse(QPointF(rx, ry), rad, rad * 0.24)
+
+            if snow_accum > 0.12:
+                fg_drift = QPainterPath()
+                bot_d = soil_bottom + 6.0
+                fg_drift.moveTo(eff_left, bot_d)
+                step_sd = 16.0
+                n_sd = max(4, int(math.ceil((eff_right - eff_left) / step_sd)))
+                for si_x in range(n_sd + 1):
+                    wx = eff_left + min(eff_right - eff_left, si_x * step_sd)
+                    rel = wx - core.left()
+                    ridge = 0.45 + 0.35 * math.cos(rel * 0.026 - 0.7) + 0.20 * math.sin(rel * 0.061 + 0.3)
+                    dy_f = _meadow_surface_y(wx, 0.04, cx0, turf_y, sc) - (1.0 + 18.0 * snow_accum * ridge) * sc
+                    fg_drift.lineTo(wx, dy_f)
+                fg_drift.lineTo(eff_right, bot_d)
+                fg_drift.closeSubpath()
+                fg_grad = QLinearGradient(QPointF(cx0, turf_y - 22.0 * sc), QPointF(cx0, bot_d))
+                fg_a = min(240, int(round(75 + 165 * snow_accum)))
+                fg_grad.setColorAt(0.0, QColor(248, 251, 255, fg_a))
+                fg_grad.setColorAt(0.55, QColor(224, 234, 246, fg_a))
+                fg_grad.setColorAt(1.0, QColor(178, 194, 216, int(fg_a * 0.85)))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(fg_grad)
+                p.drawPath(fg_drift)
 
     @staticmethod
     def current_storm_flash(
@@ -4003,8 +4559,10 @@ class AtmosphericScenePainter:
         rain_vis = atmo_anim.rain_amt if (atmo_anim is not None and atmo_anim.initialized) else (1.0 if wkind in ("rain", "thunder", "lightning") else 0.0)
         snowman_p = atmo_anim.snowman_p if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
         tree_vis = atmo_anim.tree_vis if atmo_anim is not None else (1.0 if wkind == "snow" else 0.0)
+        leafy_grow = atmo_anim.leafy_grow if (atmo_anim is not None and atmo_anim.initialized) else (0.0 if wkind == "snow" else 1.0)
         sunset_w = atmo_anim.seg_weights.get("sunset", 0.0) if (atmo_anim is not None and atmo_anim.initialized) else (1.0 if segment == "sunset" else 0.0)
         light_w = max(0.0, min(1.0, night_w + sunset_w * 0.55))
+        # 1) Receding 4-layer distant forest + ridge trees BEHIND the elevated 3D hill crest ("деревья уходят за фон")
         cls._paint_background_scene(
             p,
             core,
@@ -4018,19 +4576,10 @@ class AtmosphericScenePainter:
             snow_accum=snow_acc,
             snowman_p=snowman_p,
             tree_vis=tree_vis,
+            leafy_grow=leafy_grow,
+            stage="forest",
         )
-        precip_rect = QRectF(core)
-        cls.paint_precipitation(
-            p,
-            precip_rect,
-            wkind,
-            phase_t,
-            turf_y=core.bottom() - 5.0,
-            anim_state=atmo_anim,
-            cursor_local=cursor_local,
-            wind_ms=wind_ms,
-            quality=quality,
-        )
+        # 2) 3D sloped hillside terrain (clips/occludes lower trunks of distant forest!) + upper-slope 3D grass (z >= 0.56)
         cls.paint_bottom_grass(
             p,
             core,
@@ -4045,6 +4594,53 @@ class AtmosphericScenePainter:
             grass_sim=grass_sim,
             anim_state=atmo_anim,
             quality=quality,
+            z_mode="back",
+        )
+        # 3) 3/4 perspective log cabin + volumetric cloud chimney plume + mid-slope trees & rolling snowman ON the 3D hill
+        cls._paint_background_scene(
+            p,
+            core,
+            turf_y=core.bottom() - 5.0,
+            phase_t=phase_t,
+            wind_ms=wind_ms,
+            cursor_local=cursor_local,
+            light_w=light_w,
+            rain_amt=rain_vis,
+            snow_amt=snow_vis,
+            snow_accum=snow_acc,
+            snowman_p=snowman_p,
+            tree_vis=tree_vis,
+            leafy_grow=leafy_grow,
+            stage="props",
+        )
+        precip_rect = QRectF(core)
+        cls.paint_precipitation(
+            p,
+            precip_rect,
+            wkind,
+            phase_t,
+            turf_y=core.bottom() - 5.0,
+            anim_state=atmo_anim,
+            cursor_local=cursor_local,
+            wind_ms=wind_ms,
+            quality=quality,
+        )
+        # 4) Mid-slope & foreground 3D sloped grass (z < 0.56) overlapping bases of cabin, trees & snowman
+        cls.paint_bottom_grass(
+            p,
+            core,
+            segment,
+            wkind,
+            phase_t,
+            outer_bottom=outer_bottom,
+            outer_rect=outer_rect,
+            cursor_local=cursor_local,
+            music_energy=music_energy,
+            music_bands=music_bands,
+            grass_sim=grass_sim,
+            anim_state=atmo_anim,
+            quality=quality,
+            z_mode="front",
         )
 
     @staticmethod
@@ -4062,8 +4658,10 @@ class AtmosphericScenePainter:
         snow_accum: float,
         snowman_p: float,
         tree_vis: float,
+        leafy_grow: float | None = None,
+        stage: str = "all",
     ) -> None:
-        """Paint 3D sloped meadow clearing, distant soft conifer forest, 3/4 angled log cabin, seasonal trees & rolling snowman."""
+        """Paint receding 4-layer forest behind the 3D hill crest, 3/4 hillside cabin, cloud chimney plume, trees & snowman."""
         if core.width() <= 300.0:
             return
 
@@ -4075,194 +4673,328 @@ class AtmosphericScenePainter:
             return t * t * (3.0 - 2.0 * t)
 
         sc = max(0.55, min(1.15, float(core.height()) / 560.0))
+        cx0 = core.center().x()
         wind_force = max(0.0, min(1.0, abs(float(wind_ms)) / 20.0))
         wind_dir = 1.0 if wind_ms >= 0.0 else -1.0
-
-        # -1. Distant misty 2D conifer forest spanning full liquid stretch width (canonical size so expand morph never rebuilds!)
         dpr_f = max(1.0, float(p.device().devicePixelRatioF())) if p.device() is not None else 1.0
-        horizon_y = turf_y + 4.0 * sc
-        pad_forest_x = 190.0
-        f_w = 1040
-        f_h = 280
-        forest_key = (f_w, f_h, round(dpr_f, 2), round(light_w * 4.0), round(snow_amt * 4.0))
-        cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
-        if cache_dict is None:
-            cache_dict = {}
-            AtmosphericScenePainter._forest_cache = cache_dict
-        cached_layers = cache_dict.get(forest_key)
-        if cached_layers is None:
-            if len(cache_dict) > 6:
-                cache_dict.clear()
-            cached_layers = []
-            layer_specs = (
-                (0.68, 125, 0.0, (24, 68, 52), (16, 46, 36)),
-                (0.86, 175, 4.0, (20, 60, 44), (11, 36, 26)),
-                (1.04, 220, 8.0, (16, 52, 36), (8, 28, 20)),
-            )
-            for layer_idx, (l_scale, l_alpha, y_off, top_rgb, bot_rgb) in enumerate(layer_specs):
-                img_f = QImage(
-                    max(1, int(round(f_w * dpr_f))),
-                    max(1, int(round(f_h * dpr_f))),
-                    QImage.Format.Format_ARGB32_Premultiplied,
-                )
-                img_f.setDevicePixelRatio(dpr_f)
-                img_f.fill(0)
-                fp_p = QPainter(img_f)
-                fp_p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                c_top = QColor(
-                    int(round(top_rgb[0] * (1.0 - light_w * 0.62) + 32 * snow_amt)),
-                    int(round(top_rgb[1] * (1.0 - light_w * 0.58) + 36 * snow_amt)),
-                    int(round(top_rgb[2] * (1.0 - light_w * 0.46) + 42 * snow_amt)),
-                    l_alpha,
-                )
-                c_bot = QColor(
-                    int(round(bot_rgb[0] * (1.0 - light_w * 0.62) + 18 * snow_amt)),
-                    int(round(bot_rgb[1] * (1.0 - light_w * 0.58) + 22 * snow_amt)),
-                    int(round(bot_rgb[2] * (1.0 - light_w * 0.46) + 28 * snow_amt)),
-                    min(250, l_alpha + 25),
-                )
-                f_grad = QLinearGradient(QPointF(0.0, float(f_h) * 0.15), QPointF(0.0, float(f_h)))
-                f_grad.setColorAt(0.0, c_top)
-                f_grad.setColorAt(1.0, c_bot)
-                hi_c = QColor(min(255, c_top.red() + 14), min(255, c_top.green() + 22), min(255, c_top.blue() + 14), int(l_alpha * 0.52))
-                snow_c = QColor(232, 242, 255, int(round(115 * snow_amt)))
-                trunk_c = QColor(int(48 * (1.0 - light_w * 0.5)), int(30 * (1.0 - light_w * 0.5)), int(20 * (1.0 - light_w * 0.4)), l_alpha)
 
-                fp_p.setPen(Qt.PenStyle.NoPen)
-                tier_p = QPainterPath()
-                step_f = 28.0 * l_scale
-                n_trees_bg = int(f_w / max(9.0, step_f)) + 3
-                base_fy = float(f_h) - 2.0
-                for fi in range(n_trees_bg):
-                    fx = 8.0 + fi * step_f + ((fi * 19 + layer_idx * 11) % 9 - 4) * 1.9
-                    fh = (138.0 + ((fi * 37 + layer_idx * 23) % 92)) * l_scale
-                    fw = (48.0 + ((fi * 17 + layer_idx * 7) % 24)) * l_scale
-                    tw_f = max(3.5, fw * 0.13)
-                    fp_p.setBrush(trunk_c)
-                    fp_p.drawRoundedRect(QRectF(fx - tw_f * 0.5, base_fy - fh * 0.32, tw_f, fh * 0.34), 2.0, 2.0)
+        # Stage A: 4-layer receding forest behind the sloped 3D hill crest (canonical 1320x320, aerial perspective haze!)
+        if stage in ("all", "forest"):
+            f_w = 1320
+            f_h = 320
+            forest_key = (f_w, f_h, round(dpr_f, 2), round(light_w * 4.0), round(snow_amt * 4.0))
+            cache_dict = getattr(AtmosphericScenePainter, "_forest_cache", None)
+            if cache_dict is None:
+                cache_dict = {}
+                AtmosphericScenePainter._forest_cache = cache_dict
+            cached_layers = cache_dict.get(forest_key)
+            if cached_layers is None:
+                if len(cache_dict) > 6:
+                    cache_dict.clear()
+                cached_layers = []
+                # (scale, alpha, sink_behind_crest_px, aerial_haze, top_rgb, bot_rgb)
+                layer_specs = (
+                    (0.44, 108, 30.0, 0.56, (58, 96, 88), (38, 68, 62)),
+                    (0.60, 148, 22.0, 0.36, (38, 82, 66), (22, 54, 44)),
+                    (0.78, 190, 14.0, 0.18, (26, 70, 50), (14, 42, 30)),
+                    (0.95, 226, 6.0, 0.04, (18, 58, 38), (9, 32, 22)),
+                )
+                haze_rgb = (
+                    int(round(132 * (1.0 - light_w * 0.65) + 46 * snow_amt)),
+                    int(round(138 * (1.0 - light_w * 0.62) + 50 * snow_amt)),
+                    int(round(142 * (1.0 - light_w * 0.50) + 60 * snow_amt)),
+                )
+                for layer_idx, (l_scale, l_alpha, sink_px, haze_k, top_rgb, bot_rgb) in enumerate(layer_specs):
+                    img_f = QImage(
+                        max(1, int(round(f_w * dpr_f))),
+                        max(1, int(round(f_h * dpr_f))),
+                        QImage.Format.Format_ARGB32_Premultiplied,
+                    )
+                    img_f.setDevicePixelRatio(dpr_f)
+                    img_f.fill(0)
+                    fp_p = QPainter(img_f)
+                    fp_p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-                    # Draw each bough tier as a simple single-contour OddEven path (zero O(N^2) WindingFill tessellation!)
-                    n_tiers = 5
-                    fp_p.setBrush(f_grad)
-                    for t_i in range(n_tiers):
-                        u_t = t_i / float(n_tiers - 1)
-                        t_top_y = base_fy - fh * (1.0 - u_t * 0.72)
-                        t_bot_y = base_fy - fh * (0.74 - u_t * 0.64)
-                        t_hw = fw * (0.22 + u_t * 0.56)
-                        tier_p.clear()
-                        tier_p.moveTo(fx, t_top_y)
-                        tier_p.quadTo(fx + t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx + t_hw, t_bot_y - 2.5)
-                        n_teeth = 4 + (t_i // 2)
-                        for j_t in range(n_teeth * 2 + 1):
-                            fr_t = j_t / float(n_teeth * 2)
-                            bx_t = (fx + t_hw) - fr_t * (t_hw * 2.0)
-                            tooth = (4.0 * l_scale) if (j_t % 2 == 1) else (-1.6 * l_scale)
-                            arch = math.sin(fr_t * math.pi) * (4.2 * l_scale)
-                            tier_p.lineTo(bx_t, t_bot_y + tooth + arch)
-                        tier_p.quadTo(fx - t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx, t_top_y)
-                        tier_p.closeSubpath()
-                        fp_p.drawPath(tier_p)
+                    def _mix_haze(rgb_in: tuple[int, int, int]) -> tuple[int, int, int]:
+                        r0 = rgb_in[0] * (1.0 - light_w * 0.60) + 28 * snow_amt
+                        g0 = rgb_in[1] * (1.0 - light_w * 0.56) + 32 * snow_amt
+                        b0 = rgb_in[2] * (1.0 - light_w * 0.44) + 40 * snow_amt
+                        return (
+                            max(0, min(255, int(round(r0 * (1.0 - haze_k) + haze_rgb[0] * haze_k)))),
+                            max(0, min(255, int(round(g0 * (1.0 - haze_k) + haze_rgb[1] * haze_k)))),
+                            max(0, min(255, int(round(b0 * (1.0 - haze_k) + haze_rgb[2] * haze_k)))),
+                        )
 
-                    if layer_idx >= 1:
-                        fp_p.setBrush(hi_c)
-                        for t_i in range(4):
-                            u_t = t_i / 4.0
+                    tr_c, tg_c, tb_c = _mix_haze(top_rgb)
+                    br_c, bg_c, bb_c = _mix_haze(bot_rgb)
+                    c_top = QColor(tr_c, tg_c, tb_c, l_alpha)
+                    c_bot = QColor(br_c, bg_c, bb_c, min(252, l_alpha + 24))
+                    f_grad = QLinearGradient(QPointF(0.0, float(f_h) * 0.12), QPointF(0.0, float(f_h)))
+                    f_grad.setColorAt(0.0, c_top)
+                    f_grad.setColorAt(1.0, c_bot)
+                    hi_c = QColor(min(255, tr_c + 16), min(255, tg_c + 24), min(255, tb_c + 16), int(l_alpha * 0.48))
+                    snow_c = QColor(236, 245, 255, int(round((75 + 48 * (layer_idx / 3.0)) * snow_amt)))
+                    trunk_c = QColor(int(46 * (1.0 - light_w * 0.5)), int(30 * (1.0 - light_w * 0.5)), int(20 * (1.0 - light_w * 0.4)), l_alpha)
+
+                    fp_p.setPen(Qt.PenStyle.NoPen)
+                    tier_p = QPainterPath()
+                    step_f = 24.5 * l_scale
+                    n_trees_bg = int(f_w / max(8.0, step_f)) + 4
+                    half_fw = f_w * 0.5
+                    for fi in range(n_trees_bg):
+                        fx = 4.0 + fi * step_f + ((fi * 19 + layer_idx * 11) % 9 - 4) * 1.8
+                        # Follow the exact 3D sloped hillside crest + sink deeper with distance so trees recede BEHIND hill!
+                        ux_f = (fx - half_fw) / 660.0
+                        crest_local = 224.0 + 34.0 * math.atan(ux_f * 1.22) * 0.85 - (math.sin(ux_f * 3.8 + 0.42) * 7.2 + math.cos(ux_f * 7.6 - 0.55) * 2.6)
+                        base_fy = min(float(f_h) - 2.0, crest_local + sink_px)
+                        fh = (128.0 + ((fi * 37 + layer_idx * 23) % 88)) * l_scale
+                        fw = (44.0 + ((fi * 17 + layer_idx * 7) % 22)) * l_scale
+                        tw_f = max(3.0, fw * 0.13)
+                        fp_p.setBrush(trunk_c)
+                        fp_p.drawRoundedRect(QRectF(fx - tw_f * 0.5, base_fy - fh * 0.28, tw_f, fh * 0.34), 1.8, 1.8)
+
+                        n_tiers = 5
+                        fp_p.setBrush(f_grad)
+                        for t_i in range(n_tiers):
+                            u_t = t_i / float(n_tiers - 1)
                             t_top_y = base_fy - fh * (1.0 - u_t * 0.72)
                             t_bot_y = base_fy - fh * (0.74 - u_t * 0.64)
-                            rh_w = fw * (0.22 + u_t * 0.56) * 0.62
+                            t_hw = fw * (0.22 + u_t * 0.56)
                             tier_p.clear()
-                            tier_p.moveTo(fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
-                            tier_p.quadTo(fx + rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx + rh_w, t_bot_y - 3.0)
-                            tier_p.quadTo(fx, t_bot_y + 1.5, fx - rh_w, t_bot_y - 3.0)
-                            tier_p.quadTo(fx - rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
+                            tier_p.moveTo(fx, t_top_y)
+                            tier_p.quadTo(fx + t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx + t_hw, t_bot_y - 2.2)
+                            n_teeth = 4 + (t_i // 2)
+                            for j_t in range(n_teeth * 2 + 1):
+                                fr_t = j_t / float(n_teeth * 2)
+                                bx_t = (fx + t_hw) - fr_t * (t_hw * 2.0)
+                                tooth = (3.6 * l_scale) if (j_t & 1) else (-1.5 * l_scale)
+                                arch = math.sin(fr_t * math.pi) * (3.8 * l_scale)
+                                tier_p.lineTo(bx_t, t_bot_y + tooth + arch)
+                            tier_p.quadTo(fx - t_hw * 0.46, t_top_y + (t_bot_y - t_top_y) * 0.44, fx, t_top_y)
                             tier_p.closeSubpath()
                             fp_p.drawPath(tier_p)
 
-                    if snow_amt > 0.15 and layer_idx >= 1:
-                        fp_p.setBrush(snow_c)
-                        tier_p.clear()
-                        tier_p.moveTo(fx, base_fy - fh)
-                        tier_p.quadTo(fx + fw * 0.18, base_fy - fh * 0.86, fx + fw * 0.24, base_fy - fh * 0.78)
-                        tier_p.quadTo(fx, base_fy - fh * 0.75, fx - fw * 0.24, base_fy - fh * 0.78)
-                        tier_p.quadTo(fx - fw * 0.18, base_fy - fh * 0.86, fx, base_fy - fh)
-                        tier_p.closeSubpath()
-                        fp_p.drawPath(tier_p)
-                fp_p.end()
-                cached_layers.append((img_f, y_off))
-            cache_dict[forest_key] = cached_layers
+                        if layer_idx >= 2:
+                            fp_p.setBrush(hi_c)
+                            for t_i in range(3):
+                                u_t = t_i / 3.0
+                                t_top_y = base_fy - fh * (1.0 - u_t * 0.68)
+                                t_bot_y = base_fy - fh * (0.74 - u_t * 0.60)
+                                rh_w = fw * (0.22 + u_t * 0.52) * 0.60
+                                tier_p.clear()
+                                tier_p.moveTo(fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
+                                tier_p.quadTo(fx + rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx + rh_w, t_bot_y - 2.5)
+                                tier_p.quadTo(fx, t_bot_y + 1.4, fx - rh_w, t_bot_y - 2.5)
+                                tier_p.quadTo(fx - rh_w * 0.45, t_top_y + (t_bot_y - t_top_y) * 0.52, fx, t_top_y + (t_bot_y - t_top_y) * 0.14)
+                                tier_p.closeSubpath()
+                                fp_p.drawPath(tier_p)
 
-        for layer_idx, (img_f, y_off) in enumerate(cached_layers):
-            sway_x = math.sin(phase_t * (1.2 + wind_force * 2.2) + layer_idx * 1.4) * (1.6 + 5.5 * wind_force) * sc
-            p.drawImage(
-                QRectF(core.center().x() - (f_w * 0.5) * sc + sway_x, horizon_y + y_off * sc - float(f_h) * sc + 6.0 * sc, float(f_w) * sc, float(f_h) * sc),
-                img_f,
-            )
+                        if snow_amt > 0.15 and layer_idx >= 1:
+                            fp_p.setBrush(snow_c)
+                            tier_p.clear()
+                            tier_p.moveTo(fx, base_fy - fh)
+                            tier_p.quadTo(fx + fw * 0.18, base_fy - fh * 0.86, fx + fw * 0.24, base_fy - fh * 0.78)
+                            tier_p.quadTo(fx, base_fy - fh * 0.75, fx - fw * 0.24, base_fy - fh * 0.78)
+                            tier_p.quadTo(fx - fw * 0.18, base_fy - fh * 0.86, fx, base_fy - fh)
+                            tier_p.closeSubpath()
+                            fp_p.drawPath(tier_p)
+                    fp_p.end()
+                    cached_layers.append(img_f)
+                cache_dict[forest_key] = cached_layers
 
-        hx = core.center().x()
-        hy = turf_y + 2.0 * sc
+        eff_leafy_grow = (
+            _clamp01(1.0 - max(snow_amt, tree_vis if snow_amt > 0.1 else 0.0))
+            if leafy_grow is None
+            else _clamp01(float(leafy_grow))
+        )
 
-        def _draw_snowball(cx: float, cy: float, r: float, rot: float = 0.0) -> None:
-            p.save()
-            grad = QLinearGradient(QPointF(cx - r * 0.55, cy - r), QPointF(cx + r * 0.65, cy + r))
-            grad.setColorAt(0.0, QColor(253, 254, 255))
-            grad.setColorAt(0.48, QColor(235, 244, 254))
-            grad.setColorAt(0.84, QColor(204, 220, 240))
-            grad.setColorAt(1.0, QColor(168, 190, 218))
-            p.setPen(QPen(QColor(255, 255, 255, 195), 1.4))
-            p.setBrush(grad)
-            p.drawEllipse(QPointF(cx, cy), r, r * 0.96)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(255, 255, 255, 110))
-            p.drawEllipse(QPointF(cx - r * 0.28, cy - r * 0.32), r * 0.36, r * 0.24)
-            for k in range(10):
-                ang = rot + k * 0.6283 + (k % 3) * 0.41
-                dist_f = 0.26 + ((k * 37) % 10) * 0.055
-                px = cx + math.cos(ang) * r * dist_f
-                py = cy + math.sin(ang) * r * dist_f * 0.92
-                p.setBrush(QColor(185, 206, 232, 95) if k % 2 == 0 else QColor(255, 255, 255, 130))
-                pr = max(1.5, r * (0.045 + (k % 3) * 0.018))
-                p.drawEllipse(QPointF(px, py), pr * 1.15, pr * 0.85)
-            p.restore()
+        def _ensure_leafy_tree_cache() -> tuple[QImage, QImage]:
+            lt_key = (round(dpr_f, 2), round(light_w * 4.0))
+            lt_cache = getattr(AtmosphericScenePainter, "_leafy_tree_cache", None)
+            if lt_cache is None or lt_cache[0] != lt_key:
+                tw_i, th_i = 156, 224
+                tree_imgs: list[QImage] = []
+                for haze_mode in (0, 1):  # 0 = crisp mid-slope, 1 = misty distant crest/background
+                    t_img = QImage(
+                        max(1, int(round(tw_i * dpr_f))),
+                        max(1, int(round(th_i * dpr_f))),
+                        QImage.Format.Format_ARGB32_Premultiplied,
+                    )
+                    t_img.setDevicePixelRatio(dpr_f)
+                    t_img.fill(0)
+                    tp = QPainter(t_img)
+                    tp.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    tx_c = tw_i * 0.5
+                    by_c = th_i - 10.0
 
-        # 0. Flat 2D Front-Facing Old Wooden Log Cabin on the Horizon (cached static body + live interactive chimney smoke)
-        cab_w = 176.0 * sc
-        cab_h = 132.0 * sc
-        roof_h = 72.0 * sc
-        cab_l = hx - cab_w * 0.50
+                    dim_f = int(100 + 68 * light_w) if light_w > 0.22 else 100
+                    if haze_mode == 1:
+                        c_shadow = QColor(36, 88, 66, 200).darker(dim_f)
+                        c_deep = QColor(48, 110, 80, 212).darker(dim_f)
+                        c_mid = QColor(64, 134, 96, 218).darker(dim_f)
+                        c_bright = QColor(84, 158, 112, 218).darker(dim_f)
+                        c_rim = QColor(122, 190, 142, 168).darker(dim_f)
+                    else:
+                        c_shadow = QColor(16, 78, 42).darker(dim_f)
+                        c_deep = QColor(22, 108, 56).darker(dim_f)
+                        c_mid = QColor(32, 138, 70).darker(dim_f)
+                        c_bright = QColor(54, 168, 88).darker(dim_f)
+                        c_rim = QColor(94, 204, 122, 190).darker(dim_f)
+
+                    tp.setPen(Qt.PenStyle.NoPen)
+                    tr_g = QLinearGradient(QPointF(tx_c - 12.0, by_c), QPointF(tx_c + 12.0, by_c))
+                    tr_g.setColorAt(0.0, QColor(92, 60, 38))
+                    tr_g.setColorAt(0.45, QColor(118, 78, 48))
+                    tr_g.setColorAt(1.0, QColor(54, 34, 20))
+                    tp.setBrush(tr_g)
+                    trunk_p = QPainterPath()
+                    trunk_p.moveTo(tx_c - 13.5, by_c + 4.0)
+                    trunk_p.quadTo(tx_c - 6.2, by_c - 54.0, tx_c - 4.2, by_c - 118.0)
+                    trunk_p.lineTo(tx_c + 4.2, by_c - 118.0)
+                    trunk_p.quadTo(tx_c + 6.2, by_c - 54.0, tx_c + 13.5, by_c + 4.0)
+                    trunk_p.closeSubpath()
+                    tp.drawPath(trunk_p)
+
+                    tp.setPen(QPen(QColor(80, 50, 32), 4.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    tp.drawLine(QPointF(tx_c, by_c - 86.0), QPointF(tx_c - 35.0, by_c - 134.0))
+                    tp.drawLine(QPointF(tx_c, by_c - 90.0), QPointF(tx_c + 36.0, by_c - 136.0))
+                    tp.drawLine(QPointF(tx_c, by_c - 112.0), QPointF(tx_c - 14.0, by_c - 160.0))
+                    tp.drawLine(QPointF(tx_c, by_c - 112.0), QPointF(tx_c + 15.0, by_c - 162.0))
+
+                    cy_c = by_c - 156.0
+                    tp.setPen(Qt.PenStyle.NoPen)
+                    tp.setBrush(c_shadow)
+                    for ox, oy, rx, ry in ((-38.0, 20.0, 32.0, 22.0), (38.0, 20.0, 32.0, 22.0), (0.0, 24.0, 44.0, 24.0), (-24.0, 4.0, 36.0, 26.0), (26.0, 4.0, 36.0, 26.0)):
+                        tp.drawEllipse(QPointF(tx_c + ox, cy_c + oy), rx, ry)
+
+                    mid_g = QLinearGradient(QPointF(tx_c, cy_c - 38.0), QPointF(tx_c, cy_c + 24.0))
+                    mid_g.setColorAt(0.0, c_mid)
+                    mid_g.setColorAt(1.0, c_deep)
+                    tp.setBrush(mid_g)
+                    for ox, oy, rx, ry in ((-32.0, 6.0, 30.0, 23.0), (32.0, 8.0, 30.0, 23.0), (-18.0, -12.0, 34.0, 26.0), (20.0, -10.0, 34.0, 26.0), (0.0, 4.0, 38.0, 27.0), (0.0, -24.0, 32.0, 24.0)):
+                        tp.drawEllipse(QPointF(tx_c + ox, cy_c + oy), rx, ry)
+
+                    top_g = QLinearGradient(QPointF(tx_c - 20.0, cy_c - 46.0), QPointF(tx_c + 16.0, cy_c + 6.0))
+                    top_g.setColorAt(0.0, c_rim)
+                    top_g.setColorAt(0.45, c_bright)
+                    top_g.setColorAt(1.0, c_mid)
+                    tp.setBrush(top_g)
+                    for ox, oy, rx, ry in ((-24.0, -4.0, 22.0, 17.0), (-12.0, -20.0, 25.0, 19.0), (4.0, -28.0, 24.0, 18.0), (18.0, -14.0, 22.0, 17.0), (-4.0, -8.0, 26.0, 19.0)):
+                        tp.drawEllipse(QPointF(tx_c + ox, cy_c + oy), rx, ry)
+                    tp.end()
+                    tree_imgs.append(t_img)
+                lt_cache = (lt_key, tree_imgs[0], tree_imgs[1])
+                AtmosphericScenePainter._leafy_tree_cache = lt_cache
+            return lt_cache[1], lt_cache[2]
+
+        def _blit_emerging_tree(
+            tx_w: float,
+            ground_y_w: float,
+            scale_t: float,
+            seed_off: float,
+            hazy: bool,
+        ) -> None:
+            stagger = ((int(round(seed_off * 10.0)) % 5) * 0.042)
+            g_raw = _clamp01((eff_leafy_grow - stagger) / max(0.25, 1.0 - stagger))
+            if g_raw <= 0.01:
+                return
+            tree_fg_img, tree_bg_img = _ensure_leafy_tree_cache()
+            ts = sc * scale_t
+            em = _smooth(min(1.0, g_raw / 0.74))
+            unfold = _smooth(_clamp01((g_raw - 0.16) / 0.84))
+            elastic = (0.065 * math.sin(unfold * math.pi)) if g_raw < 0.992 else 0.0
+            spread_x = 0.24 + 0.76 * unfold + elastic
+            spread_y = 0.58 + 0.42 * em
+            sink_y = (1.0 - em) * (216.0 * ts)
+
+            gust = math.sin(phase_t * (1.45 + wind_force * 2.1) + seed_off)
+            sway_dx = (wind_dir * (1.4 + 8.0 * (wind_force ** 1.3)) + gust * (1.2 + 3.0 * wind_force)) * ts * em
+
+            w_draw = 156.0 * ts * spread_x
+            h_draw = 224.0 * ts * spread_y
+            x_draw = tx_w + sway_dx - w_draw * 0.5
+            y_draw = ground_y_w + sink_y - (214.0 / 224.0) * h_draw
+            alpha_t = (0.80 if hazy else 1.0) * min(1.0, g_raw * 1.65)
+            img_use = tree_bg_img if hazy else tree_fg_img
+
+            # Axis-aligned drawImage hits Qt's AVX2 SIMD scanline fast-path (~100x faster than p.rotate!)
+            if g_raw < 0.995:
+                p.save()
+                p.setClipRect(
+                    QRectF(tx_w - 130.0 * ts, ground_y_w - 255.0 * ts, 260.0 * ts, 257.0 * ts),
+                    Qt.ClipOperation.IntersectClip,
+                )
+                p.setOpacity(alpha_t)
+                p.drawImage(QRectF(x_draw, y_draw, w_draw, h_draw), img_use)
+                p.restore()
+            elif alpha_t < 0.995:
+                prev_op = p.opacity()
+                p.setOpacity(prev_op * alpha_t)
+                p.drawImage(QRectF(x_draw, y_draw, w_draw, h_draw), img_use)
+                p.setOpacity(prev_op)
+            else:
+                p.drawImage(QRectF(x_draw, y_draw, w_draw, h_draw), img_use)
+
+        # Align canonical crest reference (y=224 in buffer) to (turf_y - 88*sc) in world space
+        if stage in ("all", "forest"):
+            forest_top_y = (turf_y - 88.0 * sc) - 224.0 * sc
+            for layer_idx, img_f in enumerate(cached_layers):
+                sway_amp = (0.7 + 0.35 * layer_idx) * (1.2 + 4.5 * wind_force) * sc
+                sway_x = math.sin(phase_t * (1.05 + wind_force * 2.0) + layer_idx * 1.35) * sway_amp
+                p.drawImage(
+                    QRectF(cx0 - (f_w * 0.5) * sc + sway_x, forest_top_y, float(f_w) * sc, float(f_h) * sc),
+                    img_f,
+                )
+            # Distant ridge deciduous trees rooted BEHIND the 3D sloped hill crest so the hill occludes their bases!
+            if eff_leafy_grow > 0.01:
+                for tx_off, sc_t, sd_t, sink_k in (
+                    (-520.0, 0.46, 0.4, 20.0),
+                    (-390.0, 0.50, 1.5, 18.0),
+                    (-158.0, 0.52, 3.4, 19.0),
+                    (172.0, 0.48, 4.8, 20.0),
+                    (405.0, 0.50, 2.3, 18.0),
+                    (535.0, 0.45, 3.9, 21.0),
+                ):
+                    tx_bg = cx0 + tx_off * sc
+                    crest_bg_y = _meadow_crest_y(tx_bg, cx0, turf_y, sc) + sink_k * sc
+                    _blit_emerging_tree(tx_bg, crest_bg_y, sc_t, sd_t, True)
+            if stage == "forest":
+                return
+
+        # Stage B: 3D hillside props (mid-slope emerging deciduous woodland, 3/4 cabin, visible chimney + cloud smoke, winter props)
+        hx = cx0 + 6.0 * sc
+        hy = _meadow_surface_y(hx, 0.74, cx0, turf_y, sc) + 4.0 * sc
+
+        # 3/4 Perspective Angled Old Wooden Log Cabin nestled on the 3D sloped hillside clearing
+        cab_w = 152.0 * sc
+        cab_h = 116.0 * sc
+        roof_h = 64.0 * sc
+        side_dx = 40.0 * sc
+        side_dy = -14.0 * sc
+        cab_l = hx - cab_w * 0.56
         cab_t = hy - cab_h
-        ch_x = hx + cab_w * 0.22
-        ch_w = 24.0 * sc
-        ch_top = cab_t - roof_h * 0.86
+        ch_x = cab_l + cab_w * 0.68 + side_dx * 0.30
+        ch_w = 22.0 * sc
+        ch_top = cab_t - roof_h * 0.96 + side_dy * 0.30
 
-        # Cloud-style volumetric smoke rising from chimney up into the clouds, interacting with mouse cursor!
-        smoke_rise_h = max(130.0 * sc, ch_top - core.top() - 10.0 * sc)
-        smoke_rgb = (132, 138, 150) if light_w < 0.4 else (105, 112, 126)
-        for sk in range(12):
-            st = (phase_t * 0.13 + sk / 12.0) % 1.0
-            drift_r = (st ** 1.45) * (95.0 + wind_force * 175.0) * sc
-            curl_x = math.sin(phase_t * 1.6 + sk * 1.15 + st * 4.5) * (5.0 + st * 11.0) * sc
-            sx_s = ch_x + ch_w * 0.5 + drift_r + curl_x
-            sy_s = ch_top - 4.0 * sc - (st ** 0.85) * smoke_rise_h
-            if cursor_local is not None:
-                dx_c = sx_s - cursor_local.x()
-                dy_c = sy_s - cursor_local.y()
-                d_c = math.hypot(dx_c, dy_c)
-                if 1.0 < d_c < 64.0 * sc:
-                    push = (64.0 * sc - d_c) * 0.68
-                    sx_s += (dx_c / d_c) * push
-                    sy_s += (dy_c / d_c) * push * 0.65
-            sr_s = (14.0 + st * 38.0) * sc
-            fade_env = math.sin(min(1.0, st * 4.5) * math.pi * 0.5) * (1.0 - max(0.0, (st - 0.72) / 0.28))
-            sa = int(round(max(0.0, min(145.0, fade_env * 136.0))))
-            if sa > 4:
-                sm_img = _get_glow_disc_img(smoke_rgb, sa, 36)
-                p.drawImage(QRectF(sx_s - sr_s, sy_s - sr_s * 0.72, sr_s * 2.0, sr_s * 1.44), sm_img)
+        # Volumetric billowing cloud-vapor smoke rising directly from the visible brick chimney!
+        _CHIMNEY_SMOKE_SIM.paint_plume(
+            p,
+            ch_x + ch_w * 0.5,
+            ch_top - 4.0 * sc,
+            core.top(),
+            sc,
+            phase_t,
+            wind_ms,
+            light_w,
+            cursor_local,
+        )
 
         roof_snow = max(snow_amt * 0.65, snow_accum)
-        cab_pad_x = int(math.ceil(64.0 * sc))
-        cab_pad_top = int(math.ceil(roof_h + 26.0 * sc))
-        cab_pad_bot = int(math.ceil(28.0 * sc))
-        cab_img_w = max(64, int(math.ceil(cab_w + cab_pad_x * 2)))
+        cab_pad_x = int(math.ceil(82.0 * sc))
+        cab_pad_top = int(math.ceil(roof_h + 44.0 * sc))
+        cab_pad_bot = int(math.ceil(36.0 * sc))
+        cab_img_w = max(64, int(math.ceil(cab_w + side_dx + cab_pad_x * 2)))
         cab_img_h = max(64, int(math.ceil(cab_h + cab_pad_top + cab_pad_bot)))
         cab_ox = cab_l - cab_pad_x
         cab_oy = cab_t - cab_pad_top
@@ -4280,57 +5012,84 @@ class AtmosphericScenePainter:
             cp.setRenderHint(QPainter.RenderHint.Antialiasing)
             cp.translate(-cab_ox, -cab_oy)
 
-            cp.setPen(QPen(QColor(38, 42, 50), 1.2))
-            cp.setBrush(QColor(84, 88, 98))
-            cp.drawRoundedRect(QRectF(ch_x, ch_top, ch_w, 58.0 * sc), 2.0, 2.0)
-            cp.setPen(QPen(QColor(52, 56, 66, 180), 1.0))
-            for br_y in range(1, 5):
-                yy = ch_top + br_y * 10.0 * sc
-                cp.drawLine(QPointF(ch_x + 1.0, yy), QPointF(ch_x + ch_w - 1.0, yy))
-            cp.setPen(QPen(QColor(38, 42, 50), 1.2))
-            cp.setBrush(QColor(102, 106, 118))
-            cp.drawRoundedRect(QRectF(ch_x - 3.5 * sc, ch_top - 4.5 * sc, ch_w + 7.0 * sc, 7.0 * sc), 2.0, 2.0)
+            # Soft ambient ground contact shadow on the sloped clearing
+            sh_grad = QRadialGradient(QPointF(cab_l + cab_w * 0.55, hy + 4.0 * sc), cab_w * 0.82)
+            sh_grad.setColorAt(0.0, QColor(8, 18, 12, 118))
+            sh_grad.setColorAt(1.0, QColor(8, 18, 12, 0))
+            cp.setPen(Qt.PenStyle.NoPen)
+            cp.setBrush(sh_grad)
+            cp.drawEllipse(QPointF(cab_l + cab_w * 0.55, hy + 4.0 * sc), cab_w * 0.82, 16.0 * sc)
 
-            cp.setPen(QPen(QColor(42, 46, 54), 1.2))
-            cp.setBrush(QColor(74, 78, 88))
-            cp.drawRoundedRect(QRectF(cab_l - 4.0 * sc, hy - 10.0 * sc, cab_w + 8.0 * sc, 13.0 * sc), 2.0, 2.0)
+            # Stepped stone foundation anchored into the sloped hillside (deeper on downhill right side -> zero floating!)
+            found_front = QPainterPath()
+            found_front.moveTo(cab_l - 4.0 * sc, hy - 9.0 * sc)
+            found_front.lineTo(cab_l + cab_w + 4.0 * sc, hy - 9.0 * sc)
+            found_front.lineTo(cab_l + cab_w + 4.0 * sc, hy + 10.0 * sc)
+            found_front.lineTo(cab_l - 4.0 * sc, hy + 3.0 * sc)
+            found_front.closeSubpath()
+            cp.setPen(QPen(QColor(38, 42, 50), 1.2))
+            cp.setBrush(QColor(76, 80, 90))
+            cp.drawPath(found_front)
+
+            found_side = QPainterPath()
+            found_side.moveTo(cab_l + cab_w + 2.0 * sc, hy - 9.0 * sc)
+            found_side.lineTo(cab_l + cab_w + side_dx + 3.0 * sc, hy + side_dy - 9.0 * sc)
+            found_side.lineTo(cab_l + cab_w + side_dx + 3.0 * sc, hy + side_dy + 9.0 * sc)
+            found_side.lineTo(cab_l + cab_w + 2.0 * sc, hy + 10.0 * sc)
+            found_side.closeSubpath()
+            cp.setBrush(QColor(54, 58, 68))
+            cp.drawPath(found_side)
 
             n_logs = 10
             log_h = (cab_h - 8.0 * sc) / float(n_logs)
             wet_dim = 1.0 - 0.12 * rain_amt
+
+            # 3/4 Perspective Right Side Log Wall (darker shaded side face)
+            for li in range(n_logs):
+                ly = cab_t + li * log_h
+                shade = ((li * 23) % 4) * 3
+                s_poly = QPainterPath()
+                s_poly.moveTo(cab_l + cab_w, ly)
+                s_poly.lineTo(cab_l + cab_w + side_dx, ly + side_dy)
+                s_poly.lineTo(cab_l + cab_w + side_dx, ly + side_dy + log_h + 0.6)
+                s_poly.lineTo(cab_l + cab_w, ly + log_h + 0.6)
+                s_poly.closeSubpath()
+                cp.setPen(QPen(QColor(36, 20, 10, 220), 1.1))
+                cp.setBrush(QColor(int((88 - shade) * wet_dim), int((52 - shade) * wet_dim), int((28 - shade // 2) * wet_dim)))
+                cp.drawPath(s_poly)
+
+            # Front Log Facade + Corner Log End Notches
             for li in range(n_logs):
                 ly = cab_t + li * log_h
                 shade = ((li * 29) % 5) * 4
                 lg = QLinearGradient(QPointF(cab_l, ly), QPointF(cab_l, ly + log_h))
-                lg.setColorAt(0.0, QColor(int((156 - shade) * wet_dim), int((100 - shade) * wet_dim), int((58 - shade // 2) * wet_dim)))
-                lg.setColorAt(0.45, QColor(int((126 - shade) * wet_dim), int((76 - shade) * wet_dim), int((42 - shade // 2) * wet_dim)))
-                lg.setColorAt(1.0, QColor(int((76 - shade) * wet_dim), int((44 - shade // 2) * wet_dim), int((24 - shade // 3) * wet_dim)))
-                cp.setPen(QPen(QColor(46, 26, 14, 235), max(1.2, 1.4 * sc)))
+                lg.setColorAt(0.0, QColor(int((158 - shade) * wet_dim), int((102 - shade) * wet_dim), int((58 - shade // 2) * wet_dim)))
+                lg.setColorAt(0.45, QColor(int((128 - shade) * wet_dim), int((78 - shade) * wet_dim), int((43 - shade // 2) * wet_dim)))
+                lg.setColorAt(1.0, QColor(int((78 - shade) * wet_dim), int((45 - shade // 2) * wet_dim), int((25 - shade // 3) * wet_dim)))
+                cp.setPen(QPen(QColor(46, 26, 14, 235), max(1.1, 1.3 * sc)))
                 cp.setBrush(lg)
-                cp.drawRoundedRect(QRectF(cab_l - 11.0 * sc, ly, cab_w + 22.0 * sc, log_h + 0.5), log_h * 0.38, log_h * 0.38)
-                cp.setPen(QPen(QColor(58, 34, 18, 115), 0.9))
-                g_off = ((li * 19) % 24) * sc
-                cp.drawLine(QPointF(cab_l + 8.0 * sc + g_off, ly + log_h * 0.35), QPointF(cab_l + cab_w * 0.48 + g_off, ly + log_h * 0.35))
-                cp.drawLine(QPointF(cab_l + cab_w * 0.55 - g_off * 0.5, ly + log_h * 0.68), QPointF(cab_l + cab_w - 10.0 * sc, ly + log_h * 0.68))
+                cp.drawRoundedRect(QRectF(cab_l - 9.5 * sc, ly, cab_w + 19.0 * sc, log_h + 0.5), log_h * 0.38, log_h * 0.38)
                 cp.setPen(QPen(QColor(56, 32, 18, 190), 1.0))
-                cp.setBrush(QColor(174, 120, 74, 210))
-                cp.drawEllipse(QRectF(cab_l - 11.0 * sc, ly + 1.0, log_h * 0.72, log_h - 2.0))
-                cp.drawEllipse(QRectF(cab_l + cab_w + 11.0 * sc - log_h * 0.72, ly + 1.0, log_h * 0.72, log_h - 2.0))
+                cp.setBrush(QColor(176, 122, 76, 215))
+                cp.drawEllipse(QRectF(cab_l - 9.5 * sc, ly + 1.0, log_h * 0.70, log_h - 2.0))
+                cp.drawEllipse(QRectF(cab_l + cab_w + 9.5 * sc - log_h * 0.70, ly + 1.0, log_h * 0.70, log_h - 2.0))
 
+            apex_x = cab_l + cab_w * 0.50
+            apex_y = cab_t - roof_h + 4.0 * sc
             gable = QPainterPath()
-            gable.moveTo(cab_l + 4.0 * sc, cab_t + 2.0)
-            gable.lineTo(hx, cab_t - roof_h + 6.0 * sc)
-            gable.lineTo(cab_l + cab_w - 4.0 * sc, cab_t + 2.0)
+            gable.moveTo(cab_l + 3.0 * sc, cab_t + 2.0)
+            gable.lineTo(apex_x, apex_y)
+            gable.lineTo(cab_l + cab_w - 3.0 * sc, cab_t + 2.0)
             gable.closeSubpath()
             cp.setPen(QPen(QColor(58, 34, 18), 1.2))
             cp.setBrush(QColor(int(116 * wet_dim), int(70 * wet_dim), int(38 * wet_dim)))
             cp.drawPath(gable)
 
-            door_w = 38.0 * sc
-            door_h = 74.0 * sc
-            door_x = hx - cab_w * 0.22 - door_w * 0.5
+            door_w = 34.0 * sc
+            door_h = 66.0 * sc
+            door_x = cab_l + cab_w * 0.28 - door_w * 0.5
             door_y = hy - door_h - 4.0 * sc
-            cp.setPen(QPen(QColor(38, 24, 15), max(1.5, 2.0 * sc)))
+            cp.setPen(QPen(QColor(38, 24, 15), max(1.4, 1.9 * sc)))
             cp.setBrush(QColor(68, 42, 26))
             cp.drawRoundedRect(QRectF(door_x, door_y, door_w, door_h), 3.0 * sc, 3.0 * sc)
             cp.setPen(QPen(QColor(40, 24, 14, 170), 1.0))
@@ -4338,24 +5097,24 @@ class AtmosphericScenePainter:
             cp.drawLine(QPointF(door_x + door_w * 0.66, door_y + 2.0), QPointF(door_x + door_w * 0.66, door_y + door_h - 2.0))
             cp.setPen(Qt.PenStyle.NoPen)
             cp.setBrush(QColor(190, 165, 110))
-            cp.drawEllipse(QPointF(door_x + door_w - 6.5 * sc, door_y + door_h * 0.54), 2.4 * sc, 2.4 * sc)
+            cp.drawEllipse(QPointF(door_x + door_w - 6.0 * sc, door_y + door_h * 0.54), 2.2 * sc, 2.2 * sc)
 
-            win_w = 46.0 * sc
-            win_h = 42.0 * sc
-            win_x = hx + cab_w * 0.18 - win_w * 0.5
-            win_y = cab_t + 44.0 * sc
-            attic_r = 14.0 * sc
-            attic_y = cab_t - roof_h * 0.36
+            win_w = 40.0 * sc
+            win_h = 38.0 * sc
+            win_x = cab_l + cab_w * 0.70 - win_w * 0.5
+            win_y = cab_t + 38.0 * sc
+            attic_r = 12.5 * sc
+            attic_y = cab_t - roof_h * 0.35
 
             if light_w > 0.08:
                 w_glow = _get_glow_disc_img((255, 196, 88), int(round(145 * light_w)), 64)
-                gs = 110.0 * sc
+                gs = 102.0 * sc
                 cp.drawImage(QRectF(win_x + win_w * 0.5 - gs * 0.5, win_y + win_h * 0.5 - gs * 0.5, gs, gs), w_glow)
-                cp.drawImage(QRectF(hx - gs * 0.35, attic_y - gs * 0.35, gs * 0.7, gs * 0.7), w_glow)
-                lan_x, lan_y = door_x + door_w + 10.0 * sc, door_y + 14.0 * sc
-                cp.drawImage(QRectF(lan_x - 24.0 * sc, lan_y - 24.0 * sc, 48.0 * sc, 48.0 * sc), w_glow)
+                cp.drawImage(QRectF(apex_x - gs * 0.34, attic_y - gs * 0.34, gs * 0.68, gs * 0.68), w_glow)
+                lan_x, lan_y = door_x + door_w + 9.0 * sc, door_y + 13.0 * sc
+                cp.drawImage(QRectF(lan_x - 22.0 * sc, lan_y - 22.0 * sc, 44.0 * sc, 44.0 * sc), w_glow)
                 cp.setBrush(QColor(255, 224, 130, int(round(235 * light_w))))
-                cp.drawEllipse(QPointF(lan_x, lan_y), 3.6 * sc, 4.5 * sc)
+                cp.drawEllipse(QPointF(lan_x, lan_y), 3.4 * sc, 4.2 * sc)
 
             day_glass = QColor(72, 108, 138, 220)
             night_glass = QColor(255, 206, 98, 248)
@@ -4365,185 +5124,260 @@ class AtmosphericScenePainter:
                 int(round(day_glass.blue() * (1.0 - light_w) + night_glass.blue() * light_w)),
                 int(round(day_glass.alpha() * (1.0 - light_w) + night_glass.alpha() * light_w)),
             )
-            cp.setPen(QPen(QColor(44, 28, 18), max(2.0, 3.0 * sc)))
+            cp.setPen(QPen(QColor(44, 28, 18), max(1.8, 2.6 * sc)))
             cp.setBrush(wg)
             cp.drawRoundedRect(QRectF(win_x, win_y, win_w, win_h), 3.0 * sc, 3.0 * sc)
-            cp.setPen(QPen(QColor(52, 34, 22), max(1.5, 2.2 * sc)))
+            cp.setPen(QPen(QColor(52, 34, 22), max(1.4, 2.0 * sc)))
             cp.drawLine(QPointF(win_x + win_w * 0.5, win_y), QPointF(win_x + win_w * 0.5, win_y + win_h))
             cp.drawLine(QPointF(win_x, win_y + win_h * 0.5), QPointF(win_x + win_w, win_y + win_h * 0.5))
             cp.setBrush(QColor(72, 46, 28))
-            cp.drawRoundedRect(QRectF(win_x - 4.0 * sc, win_y + win_h, win_w + 8.0 * sc, 5.5 * sc), 2.0, 2.0)
+            cp.drawRoundedRect(QRectF(win_x - 3.5 * sc, win_y + win_h, win_w + 7.0 * sc, 5.0 * sc), 2.0, 2.0)
 
-            cp.setPen(QPen(QColor(44, 28, 18), max(1.8, 2.4 * sc)))
+            # Side perspective window on the 3/4 wall
+            sw_p = QPainterPath()
+            sw_x0 = cab_l + cab_w + side_dx * 0.30
+            sw_y0 = cab_t + 40.0 * sc + side_dy * 0.30
+            sw_x1 = cab_l + cab_w + side_dx * 0.72
+            sw_y1 = cab_t + 40.0 * sc + side_dy * 0.72
+            sw_p.moveTo(sw_x0, sw_y0)
+            sw_p.lineTo(sw_x1, sw_y1)
+            sw_p.lineTo(sw_x1, sw_y1 + 32.0 * sc)
+            sw_p.lineTo(sw_x0, sw_y0 + 32.0 * sc)
+            sw_p.closeSubpath()
+            cp.setPen(QPen(QColor(38, 24, 14), 1.8 * sc))
+            cp.setBrush(wg.darker(115))
+            cp.drawPath(sw_p)
+
+            cp.setPen(QPen(QColor(44, 28, 18), max(1.6, 2.2 * sc)))
             cp.setBrush(wg)
-            cp.drawEllipse(QPointF(hx, attic_y), attic_r, attic_r)
-            cp.drawLine(QPointF(hx - attic_r, attic_y), QPointF(hx + attic_r, attic_y))
-            cp.drawLine(QPointF(hx, attic_y - attic_r), QPointF(hx, attic_y + attic_r))
+            cp.drawEllipse(QPointF(apex_x, attic_y), attic_r, attic_r)
+            cp.drawLine(QPointF(apex_x - attic_r, attic_y), QPointF(apex_x + attic_r, attic_y))
+            cp.drawLine(QPointF(apex_x, attic_y - attic_r), QPointF(apex_x, attic_y + attic_r))
 
-            overhang = 22.0 * sc
+            # 3/4 Perspective Side Roof Plane
+            overhang = 19.0 * sc
+            side_roof = QPainterPath()
+            side_roof.moveTo(apex_x, apex_y - 5.0 * sc)
+            side_roof.lineTo(apex_x + side_dx + 4.0 * sc, apex_y + side_dy - 5.0 * sc)
+            side_roof.lineTo(cab_l + cab_w + overhang + side_dx + 2.0 * sc, cab_t + 8.0 * sc + side_dy)
+            side_roof.lineTo(cab_l + cab_w + overhang, cab_t + 8.0 * sc)
+            side_roof.closeSubpath()
+            srg = QLinearGradient(QPointF(apex_x, apex_y), QPointF(cab_l + cab_w + side_dx, cab_t + 10.0 * sc))
+            srg.setColorAt(0.0, QColor(int(68 * wet_dim), int(42 * wet_dim), int(30 * wet_dim)))
+            srg.setColorAt(1.0, QColor(int(40 * wet_dim), int(24 * wet_dim), int(18 * wet_dim)))
+            cp.setPen(QPen(QColor(28, 16, 10), 1.3))
+            cp.setBrush(srg)
+            cp.drawPath(side_roof)
+
+            # Protruding 3D Brick & Stone Chimney (drawn AFTER side_roof so it rises prominently out of the roof slope!)
+            ch_h = 40.0 * sc
+            ch_side_dx = 6.5 * sc
+            ch_side_dy = -2.8 * sc
+            ch_grad = QLinearGradient(QPointF(ch_x, ch_top), QPointF(ch_x + ch_w, ch_top))
+            ch_grad.setColorAt(0.0, QColor(int(138 * wet_dim), int(82 * wet_dim), int(64 * wet_dim)))
+            ch_grad.setColorAt(0.55, QColor(int(116 * wet_dim), int(68 * wet_dim), int(54 * wet_dim)))
+            ch_grad.setColorAt(1.0, QColor(int(86 * wet_dim), int(50 * wet_dim), int(40 * wet_dim)))
+            cp.setPen(QPen(QColor(42, 26, 20), 1.2))
+            cp.setBrush(ch_grad)
+            cp.drawRoundedRect(QRectF(ch_x, ch_top, ch_w, ch_h), 2.2 * sc, 2.2 * sc)
+
+            ch_side = QPainterPath()
+            ch_side.moveTo(ch_x + ch_w - 0.5, ch_top + 1.0)
+            ch_side.lineTo(ch_x + ch_w + ch_side_dx, ch_top + ch_side_dy + 1.0)
+            ch_side.lineTo(ch_x + ch_w + ch_side_dx, ch_top + ch_side_dy + ch_h - 4.0 * sc)
+            ch_side.lineTo(ch_x + ch_w - 0.5, ch_top + ch_h - 2.0 * sc)
+            ch_side.closeSubpath()
+            cp.setBrush(QColor(int(72 * wet_dim), int(42 * wet_dim), int(34 * wet_dim)))
+            cp.drawPath(ch_side)
+
+            # Brick mortar courses + vertical joints
+            cp.setPen(QPen(QColor(54, 34, 28, 185), 1.0))
+            for br_i in range(1, 5):
+                yy = ch_top + br_i * 7.2 * sc
+                cp.drawLine(QPointF(ch_x + 1.2, yy), QPointF(ch_x + ch_w - 1.2, yy))
+                vx = ch_x + (ch_w * (0.36 if (br_i & 1) else 0.66))
+                cp.drawLine(QPointF(vx, yy - 7.2 * sc + 1.0), QPointF(vx, yy))
+
+            # Chimney stone collar + dark flue mouth
+            cp.setPen(QPen(QColor(38, 28, 24), 1.2))
+            cp.setBrush(QColor(int(108 * wet_dim), int(104 * wet_dim), int(112 * wet_dim)))
+            cp.drawRoundedRect(QRectF(ch_x - 3.2 * sc, ch_top - 5.2 * sc, ch_w + ch_side_dx + 4.8 * sc, 6.8 * sc), 2.8 * sc, 2.8 * sc)
+            cp.setPen(Qt.PenStyle.NoPen)
+            cp.setBrush(QColor(26, 22, 24, 220))
+            cp.drawEllipse(QRectF(ch_x + 2.5 * sc, ch_top - 6.2 * sc, ch_w - 2.0 * sc, 3.6 * sc))
+
+            # Front Gable Fascia
             roof_p = QPainterPath()
-            roof_p.moveTo(hx, cab_t - roof_h - 4.0 * sc)
+            roof_p.moveTo(apex_x, apex_y - 5.0 * sc)
             roof_p.lineTo(cab_l + cab_w + overhang, cab_t + 8.0 * sc)
-            roof_p.lineTo(cab_l + cab_w + overhang - 6.0 * sc, cab_t + 16.0 * sc)
-            roof_p.lineTo(hx, cab_t - roof_h + 7.0 * sc)
-            roof_p.lineTo(cab_l - overhang + 6.0 * sc, cab_t + 16.0 * sc)
+            roof_p.lineTo(cab_l + cab_w + overhang - 5.5 * sc, cab_t + 15.0 * sc)
+            roof_p.lineTo(apex_x, apex_y + 5.5 * sc)
+            roof_p.lineTo(cab_l - overhang + 5.5 * sc, cab_t + 15.0 * sc)
             roof_p.lineTo(cab_l - overhang, cab_t + 8.0 * sc)
             roof_p.closeSubpath()
-            rg = QLinearGradient(QPointF(hx, cab_t - roof_h), QPointF(hx, cab_t + 14.0 * sc))
-            rg.setColorAt(0.0, QColor(int(76 * wet_dim), int(48 * wet_dim), int(34 * wet_dim)))
-            rg.setColorAt(1.0, QColor(int(48 * wet_dim), int(30 * wet_dim), int(22 * wet_dim)))
-            cp.setPen(QPen(QColor(30, 18, 12), 1.4))
+            rg = QLinearGradient(QPointF(apex_x, apex_y), QPointF(apex_x, cab_t + 14.0 * sc))
+            rg.setColorAt(0.0, QColor(int(82 * wet_dim), int(52 * wet_dim), int(36 * wet_dim)))
+            rg.setColorAt(1.0, QColor(int(50 * wet_dim), int(32 * wet_dim), int(22 * wet_dim)))
+            cp.setPen(QPen(QColor(30, 18, 12), 1.3))
             cp.setBrush(rg)
             cp.drawPath(roof_p)
-            cp.save()
-            cp.setClipPath(roof_p)
-            cp.setPen(QPen(QColor(32, 18, 10, 140), 1.0))
-            for sr in range(1, 6):
-                ry = (cab_t - roof_h) + sr * (roof_h / 5.5)
-                cp.drawLine(QPointF(cab_l - overhang, ry), QPointF(cab_l + cab_w + overhang, ry))
-            cp.restore()
 
+            # Soft, plump, marshmallow-rounded winter snow cap ("мягкая пушистая шапка снега")
             if roof_snow > 0.04:
-                sn_alpha = int(round(242 * min(1.0, roof_snow * 1.45)))
-                sn_thick = (5.0 + 13.0 * roof_snow) * sc
+                sn_alpha = int(round(248 * min(1.0, roof_snow * 1.45)))
+                sn_thick = (7.2 + 15.5 * roof_snow) * sc
+
+                # 1) Smooth rounded 3/4 side-roof snow blanket hugging the roof slope cleanly
+                sr_x0, sr_y0 = apex_x, apex_y - 5.5 * sc - sn_thick * 0.68
+                sr_x1, sr_y1 = apex_x + side_dx + 4.5 * sc, apex_y + side_dy - 5.0 * sc - sn_thick * 0.54
+                se_x1, se_y1 = cab_l + cab_w + overhang + side_dx + 2.8 * sc, cab_t + 8.0 * sc + side_dy
+                se_x0, se_y0 = cab_l + cab_w + overhang + 1.5 * sc, cab_t + 8.0 * sc
+
+                sn_side = QPainterPath()
+                sn_side.moveTo(sr_x0, sr_y0)
+                sn_side.quadTo((sr_x0 + sr_x1) * 0.5, (sr_y0 + sr_y1) * 0.5 - sn_thick * 0.14, sr_x1, sr_y1)
+                sn_side.quadTo((sr_x1 + se_x1) * 0.5 + 1.5 * sc, (sr_y1 + se_y1) * 0.5 - sn_thick * 0.08, se_x1, se_y1 - sn_thick * 0.16)
+                sn_side.cubicTo(
+                    se_x1 + 3.8 * sc, se_y1 + sn_thick * 0.18,
+                    se_x1 + 0.8 * sc, se_y1 + sn_thick * 0.62,
+                    se_x1 - 6.5 * sc, se_y1 + sn_thick * 0.56,
+                )
+                sn_side.quadTo((se_x1 + se_x0) * 0.5, (se_y1 + se_y0) * 0.5 + sn_thick * 0.64, se_x0, se_y0 + sn_thick * 0.62)
+                sn_side.lineTo(apex_x, apex_y - 2.0 * sc)
+                sn_side.closeSubpath()
+
+                side_sn_g = QLinearGradient(QPointF(sr_x0, sr_y0), QPointF(se_x1, se_y1 + sn_thick))
+                side_sn_g.setColorAt(0.0, QColor(240, 248, 255, sn_alpha))
+                side_sn_g.setColorAt(0.65, QColor(216, 232, 250, sn_alpha))
+                side_sn_g.setColorAt(1.0, QColor(188, 210, 236, sn_alpha))
+                cp.setPen(Qt.PenStyle.NoPen)
+                cp.setBrush(side_sn_g)
+                cp.drawPath(sn_side)
+
+                # Re-poke upper brick chimney cleanly above side-roof snow + soft rounded snow drift collar around its base!
+                ch_vis_h = ch_h * 0.58
+                cp.setPen(QPen(QColor(42, 26, 20), 1.1))
+                cp.setBrush(ch_grad)
+                cp.drawRoundedRect(QRectF(ch_x, ch_top, ch_w, ch_vis_h), 2.0 * sc, 2.0 * sc)
+                ch_side_top = QPainterPath()
+                ch_side_top.moveTo(ch_x + ch_w - 0.5, ch_top + 1.0)
+                ch_side_top.lineTo(ch_x + ch_w + ch_side_dx, ch_top + ch_side_dy + 1.0)
+                ch_side_top.lineTo(ch_x + ch_w + ch_side_dx, ch_top + ch_side_dy + ch_vis_h - 2.0 * sc)
+                ch_side_top.lineTo(ch_x + ch_w - 0.5, ch_top + ch_vis_h)
+                ch_side_top.closeSubpath()
+                cp.setBrush(QColor(int(72 * wet_dim), int(42 * wet_dim), int(34 * wet_dim)))
+                cp.drawPath(ch_side_top)
+                cp.setPen(QPen(QColor(54, 34, 28, 180), 1.0))
+                for br_i in range(1, 3):
+                    yy = ch_top + br_i * 7.2 * sc
+                    cp.drawLine(QPointF(ch_x + 1.2, yy), QPointF(ch_x + ch_w - 1.2, yy))
+                # Rounded snow drift collar hugging chimney base seamlessly into the roof snow
+                cp.setPen(Qt.PenStyle.NoPen)
+                cp.setBrush(QColor(236, 245, 255, sn_alpha))
+                cp.drawEllipse(QRectF(ch_x - 5.0 * sc, ch_top + ch_vis_h - 4.8 * sc, ch_w + ch_side_dx + 8.5 * sc, 8.8 * sc))
+
+                cp.setPen(QPen(QColor(38, 28, 24), 1.1))
+                cp.setBrush(QColor(int(108 * wet_dim), int(104 * wet_dim), int(112 * wet_dim)))
+                cp.drawRoundedRect(QRectF(ch_x - 3.2 * sc, ch_top - 5.2 * sc, ch_w + ch_side_dx + 4.8 * sc, 6.8 * sc), 2.8 * sc, 2.8 * sc)
+
+                # Plump rounded snow puffs on chimney rim (leaving central dark smoke flue open!)
+                cp.setPen(Qt.PenStyle.NoPen)
+                cp.setBrush(QColor(248, 252, 255, sn_alpha))
+                ch_puff_h = max(3.5 * sc, sn_thick * 0.42)
+                cp.drawEllipse(QRectF(ch_x - 4.2 * sc, ch_top - 5.5 * sc - ch_puff_h * 0.65, 11.5 * sc, ch_puff_h))
+                cp.drawEllipse(QRectF(ch_x + ch_w - 2.5 * sc, ch_top - 5.5 * sc - ch_puff_h * 0.65, 12.0 * sc, ch_puff_h))
+                cp.setBrush(QColor(26, 22, 24, 225))
+                cp.drawEllipse(QRectF(ch_x + 3.5 * sc, ch_top - 6.0 * sc, ch_w - 4.5 * sc, 3.2 * sc))
+
+                # 2) Plump, smoothly curved front gable snow cap (zero sharp points — rounded dome apex + pillowy overhanging eaves!)
+                le_x = cab_l - overhang - 3.5 * sc
+                re_x = cab_l + cab_w + overhang + 3.5 * sc
+                eave_y = cab_t + 7.5 * sc
+                top_apex_y = apex_y - 5.5 * sc - sn_thick * 0.86
+                bot_apex_y = apex_y + 2.5 * sc + sn_thick * 0.24
+
                 sn_roof = QPainterPath()
-                sn_roof.moveTo(hx, cab_t - roof_h - 6.0 * sc)
-                sn_roof.lineTo(cab_l + cab_w + overhang + 2.0 * sc, cab_t + 7.0 * sc)
-                for k_s in range(6, -1, -1):
-                    u_s = k_s / 6.0
-                    sx_e = hx + (cab_l + cab_w + overhang - hx) * u_s
-                    sy_e = (cab_t - roof_h - 4.0 * sc) + (roof_h + 12.0 * sc) * u_s
-                    bulge = sn_thick * (0.45 + 0.55 * (u_s ** 0.7)) * (0.85 + 0.25 * math.sin(u_s * 12.5))
-                    sn_roof.lineTo(sx_e, sy_e + bulge)
-                for k_s in range(1, 7):
-                    u_s = k_s / 6.0
-                    sx_e = hx - (hx - (cab_l - overhang)) * u_s
-                    sy_e = (cab_t - roof_h - 4.0 * sc) + (roof_h + 12.0 * sc) * u_s
-                    bulge = sn_thick * (0.45 + 0.55 * (u_s ** 0.7)) * (0.85 + 0.25 * math.cos(u_s * 11.0))
-                    sn_roof.lineTo(sx_e, sy_e + bulge)
-                sn_roof.lineTo(cab_l - overhang - 2.0 * sc, cab_t + 7.0 * sc)
+                # Start at left outer eave upper curve
+                sn_roof.moveTo(le_x, eave_y - sn_thick * 0.22)
+                # Left upper slope rising into a wide rounded snow dome over the roof ridge
+                sn_roof.cubicTo(
+                    le_x + (apex_x - le_x) * 0.34, eave_y - (eave_y - top_apex_y) * 0.44 - sn_thick * 0.26,
+                    apex_x - 26.0 * sc, top_apex_y - sn_thick * 0.06,
+                    apex_x, top_apex_y,
+                )
+                # Right upper slope descending smoothly from the rounded snow dome to right eave
+                sn_roof.cubicTo(
+                    apex_x + 26.0 * sc, top_apex_y - sn_thick * 0.06,
+                    re_x - (re_x - apex_x) * 0.34, eave_y - (eave_y - top_apex_y) * 0.44 - sn_thick * 0.26,
+                    re_x, eave_y - sn_thick * 0.22,
+                )
+                # Pillowy rounded right eave overhang bulb
+                sn_roof.cubicTo(
+                    re_x + 7.5 * sc, eave_y + sn_thick * 0.20,
+                    re_x + 2.5 * sc, eave_y + sn_thick * 0.96,
+                    re_x - 9.5 * sc, eave_y + sn_thick * 0.82,
+                )
+                # Softly undulating rounded snow underside up the right gable fascia to rounded inner apex
+                sn_roof.cubicTo(
+                    re_x - (re_x - apex_x) * 0.36, eave_y - (eave_y - bot_apex_y) * 0.30 + sn_thick * 0.56,
+                    apex_x + 22.0 * sc, bot_apex_y + sn_thick * 0.14,
+                    apex_x, bot_apex_y,
+                )
+                # Softly undulating rounded snow underside down the left gable fascia
+                sn_roof.cubicTo(
+                    apex_x - 22.0 * sc, bot_apex_y + sn_thick * 0.14,
+                    le_x + (apex_x - le_x) * 0.36, eave_y - (eave_y - bot_apex_y) * 0.30 + sn_thick * 0.56,
+                    le_x + 9.5 * sc, eave_y + sn_thick * 0.82,
+                )
+                # Pillowy rounded left eave overhang bulb closing smoothly
+                sn_roof.cubicTo(
+                    le_x - 2.5 * sc, eave_y + sn_thick * 0.96,
+                    le_x - 7.5 * sc, eave_y + sn_thick * 0.20,
+                    le_x, eave_y - sn_thick * 0.22,
+                )
                 sn_roof.closeSubpath()
 
-                sg_r = QLinearGradient(QPointF(hx, cab_t - roof_h - 6.0 * sc), QPointF(hx, cab_t + 22.0 * sc))
-                sg_r.setColorAt(0.0, QColor(253, 254, 255, sn_alpha))
-                sg_r.setColorAt(0.72, QColor(232, 242, 254, sn_alpha))
-                sg_r.setColorAt(1.0, QColor(194, 212, 236, sn_alpha))
-                cp.setPen(QPen(QColor(255, 255, 255, int(sn_alpha * 0.6)), 0.9))
-                cp.setBrush(sg_r)
+                front_sn_g = QLinearGradient(QPointF(apex_x, top_apex_y), QPointF(apex_x, eave_y + sn_thick))
+                front_sn_g.setColorAt(0.0, QColor(254, 255, 255, sn_alpha))
+                front_sn_g.setColorAt(0.58, QColor(240, 248, 255, sn_alpha))
+                front_sn_g.setColorAt(1.0, QColor(202, 222, 246, sn_alpha))
+                cp.setPen(QPen(QColor(255, 255, 255, int(sn_alpha * 0.85)), max(1.0, 1.2 * sc)))
+                cp.setBrush(front_sn_g)
                 cp.drawPath(sn_roof)
 
+                # Soft rounded snow pillow on front window sill
+                sill_sn = QPainterPath()
+                sx0, sx1 = win_x - 4.5 * sc, win_x + win_w + 4.5 * sc
+                sy_s = win_y + win_h + 1.5 * sc
+                sill_h = max(4.2 * sc, sn_thick * 0.36)
+                sill_sn.moveTo(sx0, sy_s)
+                sill_sn.quadTo((sx0 + sx1) * 0.5, sy_s - sill_h * 1.25, sx1, sy_s)
+                sill_sn.quadTo((sx0 + sx1) * 0.5, sy_s + sill_h * 0.45, sx0, sy_s)
+                sill_sn.closeSubpath()
                 cp.setPen(Qt.PenStyle.NoPen)
                 cp.setBrush(QColor(246, 251, 255, sn_alpha))
-                cp.drawRoundedRect(QRectF(ch_x - 4.0 * sc, ch_top - 8.0 * sc, ch_w + 8.0 * sc, 5.5 * sc), 2.5, 2.5)
-                cp.drawRoundedRect(QRectF(win_x - 4.0 * sc, win_y + win_h - 3.5 * sc, win_w + 8.0 * sc, 5.5 * sc), 2.5, 2.5)
-                cp.setBrush(QColor(210, 232, 255, int(round(sn_alpha * 0.78))))
-                for ic in range(5):
-                    ix = cab_l - overhang + (cab_w + overhang * 2.0) * (0.08 + ic * 0.21)
-                    ih_ic = (5.0 + (ic % 3) * 3.0) * sc * min(1.0, roof_snow * 1.4)
-                    ic_p = QPainterPath()
-                    ic_p.moveTo(ix - 1.6 * sc, cab_t + 14.0 * sc)
-                    ic_p.lineTo(ix + 1.6 * sc, cab_t + 14.0 * sc)
-                    ic_p.lineTo(ix, cab_t + 14.0 * sc + ih_ic)
-                    ic_p.closeSubpath()
-                    cp.drawPath(ic_p)
+                cp.drawPath(sill_sn)
             cp.end()
             cabin_cache = (cabin_key, cab_img)
             AtmosphericScenePainter._cabin_cache = cabin_cache
 
         p.drawImage(QPointF(cab_ox, cab_oy), cabin_cache[1])
 
-        # Lush 2D layered deciduous trees with sculpted cloud-foliage crowns & gentle wind sway (zero polka-dot loops)
-        leafy_vis = max(0.0, 1.0 - max(snow_amt, tree_vis if snow_amt > 0.1 else 0.0))
-        if leafy_vis > 0.02:
-            def _draw_leafy_tree(tx_l: float, scale_t: float, seed_off: float) -> None:
-                p.save()
-                p.setOpacity(leafy_vis)
-                by_l = turf_y + 8.0 * sc
-                ts = sc * scale_t
-                gust = math.sin(phase_t * (1.5 + wind_force * 2.2) + seed_off)
-                lean = wind_dir * (2.5 + 22.0 * (wind_force ** 1.35)) * ts + gust * (2.5 + 6.5 * wind_force) * ts
+        # Mid-slope deciduous trees emerging from the 3D sloped hillside & unfolding their branches/crowns!
+        if eff_leafy_grow > 0.01:
+            for tx_off, z_t, sc_t, sd_t in (
+                (-435.0, 0.74, 0.68, 0.8),
+                (-315.0, 0.70, 0.74, 1.2),
+                (-198.0, 0.64, 0.78, 1.9),
+                (212.0, 0.62, 0.84, 0.0),
+                (342.0, 0.68, 0.76, 2.8),
+                (465.0, 0.74, 0.70, 3.6),
+            ):
+                tx_m = cx0 + tx_off * sc
+                gy_m = _meadow_surface_y(tx_m, z_t, cx0, turf_y, sc) + 3.5 * sc
+                _blit_emerging_tree(tx_m, gy_m, sc_t, sd_t, False)
 
-                # Tapered wood trunk with natural root flare & gracefully forked branches
-                p.setPen(Qt.PenStyle.NoPen)
-                tr_g = QLinearGradient(QPointF(tx_l - 12 * ts, by_l), QPointF(tx_l + 12 * ts, by_l))
-                tr_g.setColorAt(0.0, QColor(96, 62, 38))
-                tr_g.setColorAt(0.45, QColor(122, 80, 50))
-                tr_g.setColorAt(1.0, QColor(58, 36, 22))
-                p.setBrush(tr_g)
-                trunk_p = QPainterPath()
-                trunk_p.moveTo(tx_l - 14.0 * ts, by_l + 4.0)
-                trunk_p.quadTo(tx_l - 6.5 * ts + lean * 0.22, by_l - 54.0 * ts, tx_l - 4.5 * ts + lean * 0.60, by_l - 118.0 * ts)
-                trunk_p.lineTo(tx_l + 4.5 * ts + lean * 0.60, by_l - 118.0 * ts)
-                trunk_p.quadTo(tx_l + 6.5 * ts + lean * 0.22, by_l - 54.0 * ts, tx_l + 14.0 * ts, by_l + 4.0)
-                trunk_p.closeSubpath()
-                p.drawPath(trunk_p)
-
-                p.setPen(QPen(QColor(82, 52, 32), max(2.0, 4.4 * ts), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.drawLine(QPointF(tx_l + lean * 0.42, by_l - 86.0 * ts), QPointF(tx_l - 36.0 * ts + lean * 0.82, by_l - 134.0 * ts))
-                p.drawLine(QPointF(tx_l + lean * 0.46, by_l - 90.0 * ts), QPointF(tx_l + 38.0 * ts + lean * 0.82, by_l - 136.0 * ts))
-                p.drawLine(QPointF(tx_l + lean * 0.58, by_l - 112.0 * ts), QPointF(tx_l - 14.0 * ts + lean * 0.90, by_l - 160.0 * ts))
-                p.drawLine(QPointF(tx_l + lean * 0.58, by_l - 112.0 * ts), QPointF(tx_l + 16.0 * ts + lean * 0.90, by_l - 162.0 * ts))
-
-                # 3-tier sculpted 2D foliage canopy domes (deep shadow base -> rich emerald mid -> sunlit top crown)
-                dim_f = int(100 + 68 * light_w) if light_w > 0.22 else 100
-                c_shadow = QColor(16, 78, 42).darker(dim_f)
-                c_deep = QColor(22, 108, 56).darker(dim_f)
-                c_mid = QColor(32, 138, 70).darker(dim_f)
-                c_bright = QColor(54, 168, 88).darker(dim_f)
-                c_rim = QColor(94, 204, 122, 185).darker(dim_f)
-
-                cx_c = tx_l + lean * 0.88
-                cy_c = by_l - 156.0 * ts
-                p.setPen(Qt.PenStyle.NoPen)
-
-                # Back/lower shadow foliage clusters
-                p.setBrush(c_shadow)
-                for ox, oy, rx, ry in (
-                    (-38.0, 20.0, 32.0, 22.0),
-                    (38.0, 20.0, 32.0, 22.0),
-                    (0.0, 24.0, 44.0, 24.0),
-                    (-24.0, 4.0, 36.0, 26.0),
-                    (26.0, 4.0, 36.0, 26.0),
-                ):
-                    p.drawEllipse(QPointF(cx_c + ox * ts, cy_c + oy * ts), rx * ts, ry * ts)
-
-                # Mid emerald foliage puffs with soft vertical gradient
-                mid_g = QLinearGradient(QPointF(cx_c, cy_c - 38.0 * ts), QPointF(cx_c, cy_c + 24.0 * ts))
-                mid_g.setColorAt(0.0, c_mid)
-                mid_g.setColorAt(1.0, c_deep)
-                p.setBrush(mid_g)
-                for ox, oy, rx, ry in (
-                    (-32.0, 6.0, 30.0, 23.0),
-                    (32.0, 8.0, 30.0, 23.0),
-                    (-18.0, -12.0, 34.0, 26.0),
-                    (20.0, -10.0, 34.0, 26.0),
-                    (0.0, 4.0, 38.0, 27.0),
-                    (0.0, -24.0, 32.0, 24.0),
-                ):
-                    p.drawEllipse(QPointF(cx_c + ox * ts, cy_c + oy * ts), rx * ts, ry * ts)
-
-                # Sunlit upper-left & crown highlight domes
-                top_g = QLinearGradient(QPointF(cx_c - 20.0 * ts, cy_c - 46.0 * ts), QPointF(cx_c + 16.0 * ts, cy_c + 6.0 * ts))
-                top_g.setColorAt(0.0, c_rim)
-                top_g.setColorAt(0.45, c_bright)
-                top_g.setColorAt(1.0, c_mid)
-                p.setBrush(top_g)
-                for ox, oy, rx, ry in (
-                    (-24.0, -4.0, 22.0, 17.0),
-                    (-12.0, -20.0, 25.0, 19.0),
-                    (4.0, -28.0, 24.0, 18.0),
-                    (18.0, -14.0, 22.0, 17.0),
-                    (-4.0, -8.0, 26.0, 19.0),
-                ):
-                    p.drawEllipse(QPointF(cx_c + ox * ts, cy_c + oy * ts), rx * ts, ry * ts)
-                p.restore()
-
-            _draw_leafy_tree(core.right() - 128.0 * sc, 0.92, 0.0)
-            _draw_leafy_tree(core.left() + 132.0 * sc, 0.80, 1.9)
-            _draw_leafy_tree(hx - 148.0 * sc, 0.56, 3.4)
-            _draw_leafy_tree(hx + 168.0 * sc, 0.52, 4.8)
-
-        if snow_amt <= 0.04:
+        if snow_amt <= 0.04 and tree_vis <= 0.02:
             return
 
         def _draw_snowball(cx: float, cy: float, r: float, rot: float = 0.0) -> None:
@@ -4556,13 +5390,9 @@ class AtmosphericScenePainter:
             p.setPen(QPen(QColor(255, 255, 255, 195), 1.4))
             p.setBrush(grad)
             p.drawEllipse(QPointF(cx, cy), r, r * 0.96)
-
-            # Soft specular highlight on upper-left
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(255, 255, 255, 110))
             p.drawEllipse(QPointF(cx - r * 0.28, cy - r * 0.32), r * 0.36, r * 0.24)
-
-            # Detailed snow grain / frost texture speckles so rotation and surface read clearly at large scale
             for k in range(10):
                 ang = rot + k * 0.6283 + (k % 3) * 0.41
                 dist_f = 0.26 + ((k * 37) % 10) * 0.055
@@ -4573,19 +5403,29 @@ class AtmosphericScenePainter:
                 p.drawEllipse(QPointF(px, py), pr * 1.15, pr * 0.85)
             p.restore()
 
-        # 1. Large Right-Side New Year Pine Tree with visible needles, ornaments & twinkling garland (behind grass)
+        # 1. Large Right-Side New Year Pine Tree anchored on 3D sloped hillside (emerges/sinks underground & unfolds boughs!)
         if tree_vis > 0.02 and core.width() > 300.0:
             p.save()
-            p.setOpacity(max(0.0, min(1.0, tree_vis * snow_amt)))
-            tx = core.right() - 128.0 * sc
-            by = turf_y + 10.0 * sc
+            p_em = _smooth(min(1.0, tree_vis / 0.80))
+            p_unfold = _smooth(_clamp01((tree_vis - 0.14) / 0.86))
+            bough_spread = 0.22 + 0.78 * p_unfold + ((0.055 * math.sin(p_unfold * math.pi)) if tree_vis < 0.99 else 0.0)
+
+            tx = core.right() - 124.0 * sc
+            by_ground = _meadow_surface_y(tx, 0.58, cx0, turf_y, sc) + 6.0 * sc
+            by = by_ground + (1.0 - p_em) * (296.0 * sc)
+            if tree_vis < 0.995:
+                p.setClipRect(
+                    QRectF(tx - 165.0 * sc, by_ground - 340.0 * sc, 330.0 * sc, 343.0 * sc),
+                    Qt.ClipOperation.IntersectClip,
+                )
+            p.setOpacity(max(0.0, min(1.0, min(1.0, tree_vis * 1.5) * max(snow_amt, tree_vis))))
 
             # Warm ambient tree glow
-            glow_img = _get_glow_disc_img((255, 220, 120), 68, 72)
-            p.drawImage(QRectF(tx - 150.0 * sc, by - 320.0 * sc, 300.0 * sc, 320.0 * sc), glow_img)
+            glow_img = _get_glow_disc_img((255, 220, 120), int(round(68 * p_unfold)), 72)
+            p.drawImage(QRectF(tx - 150.0 * sc * bough_spread, by - 320.0 * sc, 300.0 * sc * bough_spread, 320.0 * sc), glow_img)
 
             # Textured wood trunk
-            tw = 22.0 * sc
+            tw = 22.0 * sc * (0.65 + 0.35 * p_unfold)
             th = 42.0 * sc
             trunk_g = QLinearGradient(QPointF(tx - tw * 0.5, by), QPointF(tx + tw * 0.5, by))
             trunk_g.setColorAt(0.0, QColor(72, 44, 28))
@@ -4595,22 +5435,21 @@ class AtmosphericScenePainter:
             p.setBrush(trunk_g)
             p.drawRoundedRect(QRectF(tx - tw * 0.5, by - th, tw, th + 6.0), 4.0, 4.0)
 
-            # 5 lush pine tiers with jagged branch silhouettes, wind lean & swaying pine needles
+            # 5 lush pine tiers with jagged branch silhouettes, wind lean & smooth bough unfolding!
             pine_gust = math.sin(phase_t * (2.0 + wind_force * 2.8))
-            pine_lean = wind_dir * (2.5 + 22.0 * (wind_force ** 1.35)) * sc + pine_gust * (2.5 + 6.5 * wind_force) * sc
+            pine_lean = (wind_dir * (2.5 + 22.0 * (wind_force ** 1.35)) * sc + pine_gust * (2.5 + 6.5 * wind_force) * sc) * p_em
             tiers = (
-                (by - 28.0 * sc, 112.0 * sc, 82.0 * sc, 0.12),
-                (by - 82.0 * sc, 94.0 * sc, 74.0 * sc, 0.30),
-                (by - 134.0 * sc, 76.0 * sc, 66.0 * sc, 0.52),
-                (by - 182.0 * sc, 58.0 * sc, 58.0 * sc, 0.74),
-                (by - 224.0 * sc, 40.0 * sc, 52.0 * sc, 0.96),
+                (by - 28.0 * sc, 112.0 * sc * bough_spread, 82.0 * sc, 0.12),
+                (by - 82.0 * sc, 94.0 * sc * bough_spread, 74.0 * sc, 0.30),
+                (by - 134.0 * sc, 76.0 * sc * bough_spread, 66.0 * sc, 0.52),
+                (by - 182.0 * sc, 58.0 * sc * bough_spread, 58.0 * sc, 0.74),
+                (by - 224.0 * sc, 40.0 * sc * bough_spread, 52.0 * sc, 0.96),
             )
             for t_idx, (t_bot, half_w, tier_h, lean_k) in enumerate(tiers):
                 t_top = t_bot - tier_h
                 tx_t = tx + pine_lean * lean_k
                 tx_b = tx + pine_lean * max(0.0, lean_k - 0.14)
 
-                # Jagged feathery bough silhouette
                 bough = QPainterPath()
                 bough.moveTo(tx_t, t_top)
                 bough.lineTo(tx_t + half_w * 0.45, t_top + tier_h * 0.42)
@@ -4633,7 +5472,6 @@ class AtmosphericScenePainter:
                 p.setPen(QPen(QColor(46, 146, 88, 145), 1.0))
                 p.drawPath(bough)
 
-                # Realistic layered pine bough ridges (clean shaded spruce tiers without spiky stick needles)
                 ridge_p = QPainterPath()
                 ridge_p.moveTo(tx_t, t_top + tier_h * 0.16)
                 ridge_p.quadTo(tx_t + half_w * 0.34, t_top + tier_h * 0.52, tx_b + half_w * 0.72, t_bot - 6.0 * sc)
@@ -4644,7 +5482,6 @@ class AtmosphericScenePainter:
                 p.setBrush(QColor(28, 112, 66, 175))
                 p.drawPath(ridge_p)
 
-                # Soft snow dusting on upper bough ridges
                 snow_cap = QPainterPath()
                 snow_cap.moveTo(tx_t, t_top)
                 snow_cap.lineTo(tx_t + half_w * 0.44, t_top + tier_h * 0.36)
@@ -4655,53 +5492,52 @@ class AtmosphericScenePainter:
                 p.setBrush(QColor(242, 249, 255, 195))
                 p.drawPath(snow_cap)
 
-            # Draped garland strands + twinkling bulbs
+            # Draped garland strands + twinkling bulbs (unfolding in lockstep with the boughs!)
             strand_bulbs = [
-                # Top strand
-                [(tx - 24 * sc, by - 238 * sc, (255, 215, 90)), (tx - 4 * sc, by - 230 * sc, (248, 113, 113)), (tx + 20 * sc, by - 234 * sc, (56, 189, 248))],
-                # Upper-mid strand
-                [(tx - 44 * sc, by - 190 * sc, (52, 211, 153)), (tx - 14 * sc, by - 178 * sc, (255, 215, 90)), (tx + 16 * sc, by - 179 * sc, (244, 114, 182)), (tx + 44 * sc, by - 188 * sc, (56, 189, 248))],
-                # Mid strand
-                [(tx - 62 * sc, by - 140 * sc, (248, 113, 113)), (tx - 26 * sc, by - 126 * sc, (56, 189, 248)), (tx + 8 * sc, by - 124 * sc, (255, 215, 90)), (tx + 40 * sc, by - 130 * sc, (52, 211, 153)), (tx + 62 * sc, by - 141 * sc, (244, 114, 182))],
-                # Lower strand
-                [(tx - 82 * sc, by - 88 * sc, (255, 215, 90)), (tx - 42 * sc, by - 72 * sc, (248, 113, 113)), (tx + 2 * sc, by - 68 * sc, (52, 211, 153)), (tx + 44 * sc, by - 73 * sc, (56, 189, 248)), (tx + 82 * sc, by - 88 * sc, (255, 215, 90))],
-                # Bottom strand
-                [(tx - 96 * sc, by - 36 * sc, (56, 189, 248)), (tx - 48 * sc, by - 22 * sc, (244, 114, 182)), (tx, by - 18 * sc, (255, 215, 90)), (tx + 48 * sc, by - 22 * sc, (248, 113, 113)), (tx + 96 * sc, by - 36 * sc, (52, 211, 153))],
+                [(-24.0, -238.0, (255, 215, 90)), (-4.0, -230.0, (248, 113, 113)), (20.0, -234.0, (56, 189, 248))],
+                [(-44.0, -190.0, (52, 211, 153)), (-14.0, -178.0, (255, 215, 90)), (16.0, -179.0, (244, 114, 182)), (44.0, -188.0, (56, 189, 248))],
+                [(-62.0, -140.0, (248, 113, 113)), (-26.0, -126.0, (56, 189, 248)), (8.0, -124.0, (255, 215, 90)), (40.0, -130.0, (52, 211, 153)), (62.0, -141.0, (244, 114, 182))],
+                [(-82.0, -88.0, (255, 215, 90)), (-42.0, -72.0, (248, 113, 113)), (2.0, -68.0, (52, 211, 153)), (44.0, -73.0, (56, 189, 248)), (82.0, -88.0, (255, 215, 90))],
+                [(-96.0, -36.0, (56, 189, 248)), (-48.0, -22.0, (244, 114, 182)), (0.0, -18.0, (255, 215, 90)), (48.0, -22.0, (248, 113, 113)), (96.0, -36.0, (52, 211, 153))],
             ]
             def _pine_dx(yv: float) -> float:
                 return pine_lean * max(0.0, min(1.04, (by - yv) / max(1.0, 260.0 * sc)))
 
             bulb_idx = 0
             for strand in strand_bulbs:
-                shifted_strand = [(bx_s + _pine_dx(by_s), by_s, rgb_s) for bx_s, by_s, rgb_s in strand]
+                shifted_strand = [
+                    (tx + dx_s * sc * bough_spread + _pine_dx(by + dy_s * sc), by + dy_s * sc, rgb_s)
+                    for dx_s, dy_s, rgb_s in strand
+                ]
                 p.setPen(QPen(QColor(22, 42, 32, 200), max(1.2, 1.8 * sc)))
                 for si in range(len(shifted_strand) - 1):
                     p.drawLine(QPointF(shifted_strand[si][0], shifted_strand[si][1]), QPointF(shifted_strand[si + 1][0], shifted_strand[si + 1][1]))
                 p.setPen(Qt.PenStyle.NoPen)
                 for bx, by_b, rgb in shifted_strand:
-                    tw = 0.50 + 0.50 * math.sin(phase_t * 3.8 + bulb_idx * 1.1)
-                    b_glow = _get_glow_disc_img(rgb, int(round(95 + 115 * tw)), 24)
+                    tw_b = 0.50 + 0.50 * math.sin(phase_t * 3.8 + bulb_idx * 1.1)
+                    b_glow = _get_glow_disc_img(rgb, int(round((95 + 115 * tw_b) * p_unfold)), 24)
                     gs = 24.0 * sc
                     p.drawImage(QRectF(bx - gs * 0.5, by_b - gs * 0.5, gs, gs), b_glow)
-                    p.setBrush(QColor(rgb[0], rgb[1], rgb[2], int(round(180 + 75 * tw))))
+                    p.setBrush(QColor(rgb[0], rgb[1], rgb[2], int(round(180 + 75 * tw_b))))
                     p.drawEllipse(QPointF(bx, by_b), 4.2 * sc, 4.2 * sc)
-                    p.setBrush(QColor(255, 255, 255, int(round(140 * tw))))
+                    p.setBrush(QColor(255, 255, 255, int(round(140 * tw_b))))
                     p.drawEllipse(QPointF(bx - 1.1 * sc, by_b - 1.1 * sc), 1.3 * sc, 1.3 * sc)
                     bulb_idx += 1
 
-            # Glossy ornaments (swaying together with the pine boughs)
-            ornaments = [
-                (tx - 18 * sc, by - 208 * sc, QColor(239, 68, 68)),
-                (tx + 24 * sc, by - 160 * sc, QColor(250, 204, 21)),
-                (tx - 38 * sc, by - 110 * sc, QColor(59, 130, 246)),
-                (tx + 18 * sc, by - 102 * sc, QColor(236, 72, 153)),
-                (tx - 62 * sc, by - 58 * sc, QColor(250, 204, 21)),
-                (tx + 58 * sc, by - 56 * sc, QColor(239, 68, 68)),
-                (tx - 16 * sc, by - 46 * sc, QColor(56, 189, 248)),
-            ]
-            for ox_raw, oy, ocol in ornaments:
-                ox = ox_raw + _pine_dx(oy)
-                r_o = 5.6 * sc
+            # Glossy ornaments (unfolding & swaying together with the pine boughs)
+            ornaments = (
+                (-18.0, -208.0, QColor(239, 68, 68)),
+                (24.0, -160.0, QColor(250, 204, 21)),
+                (-38.0, -110.0, QColor(59, 130, 246)),
+                (18.0, -102.0, QColor(236, 72, 153)),
+                (-62.0, -58.0, QColor(250, 204, 21)),
+                (58.0, -56.0, QColor(239, 68, 68)),
+                (-16.0, -46.0, QColor(56, 189, 248)),
+            )
+            for odx, ody, ocol in ornaments:
+                oy = by + ody * sc
+                ox = tx + odx * sc * bough_spread + _pine_dx(oy)
+                r_o = 5.6 * sc * (0.5 + 0.5 * p_unfold)
                 p.setPen(QPen(ocol.darker(145), 1.0))
                 p.setBrush(ocol)
                 p.drawEllipse(QPointF(ox, oy), r_o, r_o)
@@ -4709,17 +5545,18 @@ class AtmosphericScenePainter:
                 p.setBrush(QColor(255, 255, 255, 165))
                 p.drawEllipse(QPointF(ox - r_o * 0.32, oy - r_o * 0.32), r_o * 0.28, r_o * 0.28)
 
-            # Radiant golden star on top (swaying in lockstep with the tree apex)
+            # Radiant golden star on top (emerging & swaying in lockstep with the tree apex)
             star_y = by - 280.0 * sc
             star_x = tx + _pine_dx(star_y)
             star_tw = 0.72 + 0.28 * math.sin(phase_t * 2.8)
-            s_glow = _get_glow_disc_img((255, 232, 115), int(round(145 * star_tw)), 40)
-            s_sz = 46.0 * sc
+            s_glow = _get_glow_disc_img((255, 232, 115), int(round(145 * star_tw * p_unfold)), 40)
+            s_sz = 46.0 * sc * (0.45 + 0.55 * p_unfold)
             p.drawImage(QRectF(star_x - s_sz * 0.5, star_y - s_sz * 0.5, s_sz, s_sz), s_glow)
             star_p = QPainterPath()
+            star_sc = 0.45 + 0.55 * p_unfold
             for k in range(10):
                 ang = -math.pi * 0.5 + k * (math.pi / 5.0)
-                rad = (15.5 if k % 2 == 0 else 6.8) * sc
+                rad = (15.5 if k % 2 == 0 else 6.8) * sc * star_sc
                 pt = QPointF(star_x + math.cos(ang) * rad, star_y + math.sin(ang) * rad)
                 if k == 0:
                     star_p.moveTo(pt)
@@ -4731,19 +5568,19 @@ class AtmosphericScenePainter:
             p.drawPath(star_p)
             p.restore()
 
-        # 2. Large Self-Rolling & Self-Decorating Snowman on Left-Center Background (behind grass)
+        # 2. Large Self-Rolling & Self-Decorating Snowman on Left-Center 3D Hillside (z=0.48)
         if snowman_p > 0.01 and core.width() > 300.0:
             p.save()
             p.setOpacity(max(0.0, min(1.0, snow_amt)))
             sm_x = core.left() + 148.0 * sc
-            ground_y = turf_y + 8.0 * sc
-            r1, r2, r3 = 48.0 * sc, 35.0 * sc, 25.0 * sc
+            ground_y = _meadow_surface_y(sm_x, 0.48, cx0, turf_y, sc) + 5.0 * sc
+            r1, r2, r3 = 44.0 * sc, 32.0 * sc, 23.0 * sc
 
-            # Stage 1 (0.00..0.30): Bottom snowball rolls in from left
+            # Stage 1 (0.00..0.30): Bottom snowball rolls down the 3D sloped hill from left
             t1 = _smooth(snowman_p / 0.30)
             b1_x = (core.left() + 26.0 * sc) + (sm_x - (core.left() + 26.0 * sc)) * t1
             b1_r = r1 * (0.42 + 0.58 * t1)
-            b1_y = ground_y - b1_r
+            b1_y = (_meadow_surface_y(b1_x, 0.48, cx0, turf_y, sc) + 5.0 * sc) - b1_r
             _draw_snowball(b1_x, b1_y, b1_r, rot=t1 * 6.28)
 
             # Stage 2 (0.30..0.56): Middle torso snowball rolls in & hops onto bottom ball

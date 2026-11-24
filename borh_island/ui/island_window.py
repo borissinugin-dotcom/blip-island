@@ -81,6 +81,7 @@ from .atmosphere import (
     AtmosphericScenePainter,
     CloudSmokeField,
     GrassSkeletonSim,
+    _CHIMNEY_SMOKE_SIM,
     describe_atmosphere_badge,
     resolve_scene_state,
 )
@@ -2760,17 +2761,25 @@ class IslandWindow(QWidget):
 
         near_grass = (
             self._expanded
-            and core.left() - 36.0 <= local.x() <= core.right() + 36.0
-            and core.bottom() - 185.0 <= local.y() <= core.bottom() + 6.0
+            and -24.0 <= local.x() <= (self.width() + 24.0)
+            and core.bottom() - 220.0 <= local.y() <= (self.height() + 8.0)
         )
         near_sky = (
             self._expanded
-            and core.left() - 36.0 <= local.x() <= core.right() + 36.0
-            and core.top() - 28.0 <= local.y() <= core.top() + 145.0
+            and -24.0 <= local.x() <= (self.width() + 24.0)
+            and core.top() - 28.0 <= local.y() <= core.top() + 155.0
         )
-        self._last_near_grass = near_grass
-        self._last_near_sky = near_sky
+        near_smoke = (
+            self._expanded
+            and (core.center().x() - 80.0) <= local.x() <= (self.width() + 24.0)
+            and core.top() <= local.y() <= (core.bottom() - 90.0)
+        )
         cursor_moved = abs(cur_dx) > 0.35 or abs(cur_dy) > 0.35
+        if cursor_moved:
+            self._last_cursor_move_ts = now_a
+        cursor_recently_moved = (now_a - getattr(self, "_last_cursor_move_ts", 0.0)) < 0.14
+        self._last_near_grass = near_grass and cursor_recently_moved
+        self._last_near_sky = (near_sky or near_smoke) and cursor_recently_moved
         active_physics = (
             abs(self._drop_amp) > 0.008
             or abs(self._drop_vel) > 0.008
@@ -2785,8 +2794,9 @@ class IslandWindow(QWidget):
             or abs(self._fluid_vy) > 0.15
             or (near_grass and cursor_moved)
             or self._grass_sim.is_settling()
-            or (near_sky and cursor_moved)
+            or ((near_sky or near_smoke) and cursor_moved)
             or self._cloud_sim.is_dispersing()
+            or _CHIMNEY_SMOKE_SIM.is_dispersing()
             or self._atmo_anim.is_transitioning()
             or self._music_vis_env > 0.008
             or self._hide_state in ("hiding", "showing")
@@ -4143,6 +4153,7 @@ class IslandWindow(QWidget):
                     or self._anim.state() == QPropertyAnimation.State.Running
                     or self._grass_sim.is_settling()
                     or self._cloud_sim.is_dispersing()
+                    or _CHIMNEY_SMOKE_SIM.is_dispersing()
                     or self._atmo_anim.is_transitioning()
                     or getattr(self, "_last_near_grass", False)
                     or getattr(self, "_last_near_sky", False)
