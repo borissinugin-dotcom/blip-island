@@ -63,7 +63,7 @@ function buildYooMoneyPayUrl(wallet, amountRub, orderId, paymentType = "AC") {
     sum: String(amountRub),
     label: orderId,
   });
-  return `https://yoomoney.ru/quickpay/confirm.xml?${params.toString()}`;
+  return `https://yoomoney.ru/quickpay/confirm?${params.toString()}`;
 }
 
 export async function handleRequest(request, env) {
@@ -96,7 +96,7 @@ export async function handleRequest(request, env) {
     }
 
     const isMaster = Boolean(body?.is_master);
-    const amountRub = isMaster ? 10 : Number(env.MIN_AMOUNT_RUB || 300);
+    const amountRub = isMaster ? 100 : Number(env.MIN_AMOUNT_RUB || 300);
     const payType = String(body?.payment_type || "AC").toUpperCase() === "PC" ? "PC" : "AC";
     const orderId = randomOrderId();
     const record = {
@@ -160,12 +160,6 @@ export async function handleRequest(request, env) {
       return json({ ok: false, error: "payment_held_or_unaccepted" }, 400);
     }
 
-    const minAmount = Number(env.MIN_AMOUNT_RUB || 10);
-    const paidAmount = Math.max(Number(withdrawAmount || 0), Number(amount || 0));
-    if (!Number.isFinite(paidAmount) || paidAmount + 0.5 < minAmount) {
-      return json({ ok: false, error: "insufficient_amount" }, 400);
-    }
-
     if (!label) {
       return json({ ok: true, ignored: "empty_label" });
     }
@@ -178,6 +172,12 @@ export async function handleRequest(request, env) {
     const order = JSON.parse(rawOrder);
     if (order.status === "paid" && order.license) {
       return json({ ok: true, already_paid: true });
+    }
+
+    const minAmount = Number(order.amount_rub || env.MIN_AMOUNT_RUB || 300);
+    const paidAmount = Math.max(Number(withdrawAmount || 0), Number(amount || 0));
+    if (!Number.isFinite(paidAmount) || paidAmount + 0.5 < minAmount) {
+      return json({ ok: false, error: "insufficient_amount" }, 400);
     }
 
     const licensePayload = {

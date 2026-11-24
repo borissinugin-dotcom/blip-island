@@ -734,7 +734,7 @@ class LicenseManager:
     def create_payment_order(self, worker_url: str = WORKER_BASE_URL) -> tuple[bool, dict]:
         try:
             is_master = bool(self.get_status().is_master)
-            target_sum = 10 if is_master else 300
+            target_sum = 100 if is_master else 300
             status_code, data = _worker_request(
                 "POST",
                 f"{worker_url.rstrip('/')}/order/create",
@@ -752,10 +752,14 @@ class LicenseManager:
                 data["amount_rub"] = target_sum
                 for url_key in ("pay_url", "qr_url", "sbp_url"):
                     u = str(data.get(url_key) or "").strip()
-                    if "yoomoney.ru/quickpay/confirm.xml" in u:
+                    if "yoomoney.ru/quickpay/confirm" in u:
                         import re
 
-                        u = re.sub(r"([?&])sum=\d+(?:\.\d+)?", rf"\g<1>sum={target_sum}", u)
+                        if re.search(r"([?&])sum=\d+(?:\.\d+)?", u):
+                            u = re.sub(r"([?&])sum=\d+(?:\.\d+)?", rf"\g<1>sum={target_sum}", u)
+                        else:
+                            sep = "&" if "?" in u else "?"
+                            u += f"{sep}sum={target_sum}"
                         if "paymentType=" not in u:
                             u += "&paymentType=AC"
                         data[url_key] = u
