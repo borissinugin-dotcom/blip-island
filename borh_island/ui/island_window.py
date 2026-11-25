@@ -2048,6 +2048,16 @@ class IslandWindow(QWidget):
             self._in_game,
             cfg.pill_mode,
         )
+        was_lyrics_on = bool(getattr(self, "_last_pill_lyrics_on", False))
+        now_lyrics_on = bool(
+            cfg.show_lyrics_in_pill
+            and self._has_media
+            and self._media_lyric
+            and not self._expanded
+            and not self._music_strip_open
+        )
+        self._last_pill_lyrics_on = now_lyrics_on
+
         if sig != self._last_media_sig:
             self._last_media_sig = sig
             self._sync_palettes(force_panel=(self._effective_appearance_mode() == "music"))
@@ -2055,7 +2065,9 @@ class IslandWindow(QWidget):
             self._sync_character_state()
             if hasattr(self.panel, "card_rain"):
                 self.panel.card_rain.mark_underlay_dirty()
-        if not self._expanded and was_has_media != self._has_media:
+            self.pill_bar.update()
+            self.update()
+        if not self._expanded and (was_has_media != self._has_media or was_lyrics_on != now_lyrics_on):
             self.reposition(animate=True)
 
     def update_spectrum(self, bands: list[float]) -> None:

@@ -88,8 +88,8 @@ class BorhIslandController(QObject):
 
         self.storage = LocalStorage(self.config_mgr.data_dir / "borh_island.db")
         self.bridge = NativeBridge(self.config_mgr.data_dir)
-        self.winrt_worker = WinRTWorker()
-        self.media_winrt_worker = WinRTWorker()
+        self.winrt_worker = WinRTWorker(low_priority=True)
+        self.media_winrt_worker = WinRTWorker(low_priority=False)
 
         # Services
         self.media_service = MediaService(self.media_winrt_worker, self.bridge, self)

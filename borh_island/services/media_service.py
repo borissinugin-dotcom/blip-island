@@ -209,6 +209,7 @@ class MediaService(QObject):
         self._art_cache: dict[str, tuple[QImage, str]] = {}
         self._art_loading: set[str] = set()
         self._art_hq_tried: set[str] = set()
+        self._smtc_thumb_tried: set[str] = set()
         self._spotify_hwnd: int = 0
         self._last_spotify_active: MediaSessionInfo | None = None
         self._last_snapshot = MediaStateSnapshot()
@@ -225,6 +226,12 @@ class MediaService(QObject):
         self._cached_fb_ym_wins: list[tuple[int, str, str]] = []
         self._cached_fb_aw_wins: list[tuple[int, str, str]] = []
         self._last_emitted_idle = False
+        self._last_emit_meta_sig: tuple | None = None
+        self._last_emit_pos_ts = 0.0
+
+        self._wake_event = threading.Event()
+        self._poll_thread: threading.Thread | None = None
+        self._poll_interval_s = 0.11
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(260)
@@ -232,22 +239,26 @@ class MediaService(QObject):
         self._poll_interval_req.connect(self._set_poll_interval)
 
     def _set_poll_interval(self, ms: int) -> None:
-        want = max(180, min(1500, int(ms)))
-        if self._poll_timer.interval() != want:
-            self._poll_timer.setInterval(want)
+        want = max(100, min(1500, int(ms)))
+        self._poll_interval_s = want / 1000.0
 
     def start(self) -> None:
-        self._poll_timer.start()
-        self.poll_now()
+        self._stopped = False
+        if self._poll_thread is None or not self._poll_thread.is_alive():
+            self._poll_thread = threading.Thread(target=self._poll_loop, name="BorhMediaPoll", daemon=True)
+            self._poll_thread.start()
+        self._wake_event.set()
 
     def stop(self) -> None:
         self._stopped = True
+        self._wake_event.set()
         self._poll_timer.stop()
         self.set_spectrum_enabled(False)
 
     def set_preferred_player(self, app_id: str) -> None:
         self.preferred_app_id = app_id
-        self._set_poll_interval(220)
+        self._poll_interval_s = 0.11
+        self._last_emit_meta_sig = None
         self.poll_now()
 
     def set_spectrum_enabled(self, enabled: bool, device_id: str = "default") -> None:
@@ -280,45 +291,92 @@ class MediaService(QObject):
         item = self._art_cache.get(art_key)
         return item[0] if item else None
 
+    def _poll_once_impl(self, *, skip_thumb: bool = True, force_emit: bool = False) -> None:
+        if getattr(self, "_stopped", False):
+            return
+        pref = self.preferred_app_id
+        # Always poll metadata first with skip_thumb=True (~2ms) so song titles NEVER wait on thumbnail I/O!
+        raw = self.worker.get_media_state(pref, skip_thumb=skip_thumb)
+        if getattr(self, "_stopped", False):
+            return
+        snap = self._build_snapshot(raw)
+        self._last_snapshot = snap
+        act = snap.active
+        is_play = bool(act and act.status == "Playing" and (act.source_id or "") not in ("discord", "telegram"))
+        src_tok = (act.app_id or act.source_id or "") if (act and is_play) else ""
+        sig_lb = (is_play, src_tok.lower())
+        if sig_lb != getattr(self, "_last_loopback_filter", None):
+            self._last_loopback_filter = sig_lb
+            self.bridge.update_loopback_filter(src_tok, is_play)
+
+        if act is not None and act.status == "Playing":
+            self._poll_interval_s = 0.11
+        elif act is not None or snap.sessions:
+            self._poll_interval_s = 0.30
+        else:
+            self._poll_interval_s = 0.65
+
+        is_idle_now = act is None and not snap.sessions
+        if is_idle_now and self._last_emitted_idle and not force_emit:
+            return
+        self._last_emitted_idle = is_idle_now
+
+        now_t = time.monotonic()
+        meta_sig = (
+            (act.app_id if act else ""),
+            (act.title if act else ""),
+            (act.artist if act else ""),
+            (act.album if act else ""),
+            (act.status if act else "Closed"),
+            (act.source_id if act else ""),
+            (act.art_key if act else ""),
+            (act.accent_color if act else ""),
+            snap.active_lyric,
+            tuple((s.app_id, s.title, s.status) for s in snap.sessions),
+        )
+        meta_changed = meta_sig != self._last_emit_meta_sig
+        if force_emit or meta_changed or (now_t - self._last_emit_pos_ts) >= 0.24:
+            self._last_emit_meta_sig = meta_sig
+            self._last_emit_pos_ts = now_t
+            self.state_changed.emit(snap)
+
+        # If a new track's SMTC thumbnail hasn't been checked yet, fetch it once after emitting the instant title!
+        if act is not None and act.art_key and act.art_key not in self._art_cache and act.art_key not in self._smtc_thumb_tried:
+            if len(self._smtc_thumb_tried) > 64:
+                self._smtc_thumb_tried.clear()
+            self._smtc_thumb_tried.add(act.art_key)
+            raw_thumb = self.worker.get_media_state(pref, skip_thumb=False)
+            b64_new = ((raw_thumb.get("active") or {}).get("thumbnail_b64")) or ""
+            if b64_new and not getattr(self, "_stopped", False):
+                snap2 = self._build_snapshot(raw_thumb)
+                self._last_snapshot = snap2
+                self._last_emit_meta_sig = None
+                self.state_changed.emit(snap2)
+
+    def _poll_loop(self) -> None:
+        while not getattr(self, "_stopped", False):
+            self._wake_event.clear()
+            try:
+                self._poll_once_impl(skip_thumb=True)
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            if getattr(self, "_stopped", False):
+                break
+            self._wake_event.wait(timeout=max(0.06, float(self._poll_interval_s)))
+
     def poll_now(self, *, skip_thumb: bool = False) -> None:
+        if self._poll_thread is not None and self._poll_thread.is_alive():
+            self._wake_event.set()
+            return
         if self._poll_busy:
             return
         self._poll_busy = True
-        pref = self.preferred_app_id
 
         def _work() -> None:
             try:
-                if getattr(self, "_stopped", False):
-                    return
-                raw = self.worker.get_media_state(pref, skip_thumb=skip_thumb)
-                if getattr(self, "_stopped", False):
-                    return
-                snap = self._build_snapshot(raw)
-                self._last_snapshot = snap
-                act = snap.active
-                is_play = bool(act and act.status == "Playing" and (act.source_id or "") not in ("discord", "telegram"))
-                src_tok = (act.app_id or act.source_id or "") if (act and is_play) else ""
-                sig = (is_play, src_tok.lower())
-                if sig != getattr(self, "_last_loopback_filter", None):
-                    self._last_loopback_filter = sig
-                    self.bridge.update_loopback_filter(src_tok, is_play)
-
-                # Adapt polling rate: fast when music plays (synced lyrics/seekbar), calm backoff when paused/idle
-                if act is not None and act.status == "Playing":
-                    want_ms = 220
-                elif act is not None or snap.sessions:
-                    want_ms = 650
-                else:
-                    want_ms = 1000
-                try:
-                    self._poll_interval_req.emit(want_ms)
-                except RuntimeError:
-                    return
-
-                is_idle_now = act is None and not snap.sessions
-                if not (is_idle_now and self._last_emitted_idle):
-                    self._last_emitted_idle = is_idle_now
-                    self.state_changed.emit(snap)
+                self._poll_once_impl(skip_thumb=skip_thumb, force_emit=True)
             except RuntimeError:
                 pass
             finally:
@@ -352,33 +410,33 @@ class MediaService(QObject):
         ) and bool(procs & browser_exes)
 
         act_playing_raw = bool(act_raw and act_raw.get("status") == "Playing" and (act_raw.get("title") or act_raw.get("artist")))
+        act_app_low = ((act_raw.get("app_id") or "") if act_raw else "").lower()
         has_sp_proc = bool(procs & sp_exes)
-        has_ym_proc = bool(procs & ym_exes) and (not act_playing_raw) and (not self.preferred_app_id or "yandex" in self.preferred_app_id.lower())
+        has_ym_proc = bool(procs & ym_exes) and (not self.preferred_app_id or "yandex" in self.preferred_app_id.lower())
         has_aw_proc = bool(procs & aw_exes) and (not act_playing_raw) and (
             not self.preferred_app_id or any(k in self.preferred_app_id.lower() for k in ("aimp", "winamp"))
         )
 
         now_fb = time.monotonic()
-        fb_playing = bool(
-            (getattr(self, "_cached_fb_sp", None) and self._cached_fb_sp[1] == "Playing")
-            or getattr(self, "_cached_fb_ym_wins", None)
-            or getattr(self, "_cached_fb_aw_wins", None)
-        )
-        fb_ttl = 0.65 if fb_playing else 1.5
+        fb_ttl = 0.16 if (has_sp_proc or has_ym_proc) else 1.2
         need_fb_scan = (now_fb - getattr(self, "_last_fallback_scan_t", 0.0)) >= fb_ttl
 
-        # Perform AT MOST ONE combined desktop HWND enumeration per tick!
+        # Perform AT MOST ONE combined desktop HWND enumeration per tick (~0.1ms)!
         scan_exes: set[str] = set()
         if need_browsers:
             scan_exes |= browser_exes
-        if has_ym_proc and need_fb_scan:
+        if has_ym_proc and (not act_playing_raw or "yandex" in act_app_low or need_fb_scan):
             scan_exes |= ym_exes
         if has_aw_proc and need_fb_scan:
             scan_exes |= aw_exes
-        if has_sp_proc and (not act_playing_raw or need_fb_scan):
+        if has_sp_proc and (not act_playing_raw or "spotify" in act_app_low or need_fb_scan):
             scan_exes |= sp_exes
 
-        all_wins = enum_visible_process_windows(scan_exes) if scan_exes else []
+        all_wins = (
+            enum_visible_process_windows(scan_exes, include_hidden_players=True)
+            if scan_exes
+            else []
+        )
         if need_fb_scan and (has_sp_proc or has_ym_proc or has_aw_proc):
             self._last_fallback_scan_t = now_fb
 
@@ -431,20 +489,39 @@ class MediaService(QObject):
             self._cached_fb_sp = None
         self._spotify_hwnd = sp[0] if sp is not None else 0
 
-        # Fallback / supplement for Yandex Music desktop app window titles ONLY if GSMTC has no active track at all
+        # Live window-title override for Spotify when Windows GSMTC lags behind a newly switched song!
+        if sp is not None and sp[1] == "Playing" and sp[3] and act_raw and "spotify" in act_app_low:
+            _, _sp_st, sp_artist_live, sp_title_live = sp
+            g_title_low = (act_raw.get("title") or "").strip().lower()
+            sp_full_low = f"{sp_artist_live} - {sp_title_live}".strip().lower()
+            if not g_title_low or (g_title_low not in sp_full_low and sp_title_live.lower() not in g_title_low):
+                act_raw = dict(act_raw)
+                act_raw["title"] = sp_title_live
+                act_raw["artist"] = sp_artist_live
+                act_raw["album"] = ""
+                act_raw["status"] = "Playing"
+                act_raw["position"] = 0.0
+                act_raw["duration"] = 0.0
+                act_raw["thumbnail_b64"] = ""
+                for s_obj in sessions:
+                    if s_obj.source_id == "spotify":
+                        s_obj.title = sp_title_live
+                        s_obj.artist = sp_artist_live
+                        s_obj.status = "Playing"
+
+        # Fallback + live window-title override for Yandex Music desktop app when GSMTC is missing or lagging
         has_gsmtc_track = bool(act_raw and (act_raw.get("title") or act_raw.get("artist")))
         act_playing = bool(has_gsmtc_track and act_raw.get("status") == "Playing")
-        if (not has_gsmtc_track) and (
-            not self.preferred_app_id or "yandex" in self.preferred_app_id.lower()
-        ):
-            if has_ym_proc and (ym_exes & scan_exes):
-                ym_wins = [w for w in all_wins if w[1] in ym_exes]
-                self._cached_fb_ym_wins = ym_wins
-            elif has_ym_proc:
-                ym_wins = getattr(self, "_cached_fb_ym_wins", [])
-            else:
-                ym_wins = []
-                self._cached_fb_ym_wins = []
+        if has_ym_proc and (ym_exes & scan_exes):
+            ym_wins = [w for w in all_wins if w[1] in ym_exes]
+            self._cached_fb_ym_wins = ym_wins
+        elif has_ym_proc:
+            ym_wins = getattr(self, "_cached_fb_ym_wins", [])
+        else:
+            ym_wins = []
+            self._cached_fb_ym_wins = []
+
+        if ym_wins and (not self.preferred_app_id or "yandex" in self.preferred_app_id.lower()):
             for _yh, _yexe, ytitle in ym_wins:
                 yt = (ytitle or "").strip()
                 if yt and yt.lower() not in ("яндекс музыка", "yandex music"):
@@ -454,24 +531,38 @@ class MediaService(QObject):
                         y_art, y_tr = yt.split(" - ", 1)
                     else:
                         y_art, y_tr = "", yt
-                    act_raw = {
-                        "app_id": "YandexMusic.exe",
-                        "title": y_tr.strip(),
-                        "artist": y_art.strip(),
-                        "album": "",
-                        "status": "Playing",
-                        "position": 0.0,
-                        "duration": 0.0,
-                        "thumbnail_b64": "",
-                    }
-                    has_gsmtc_track = True
-                    act_playing = True
+                    y_tr_c, y_art_c = y_tr.strip(), y_art.strip()
+                    if not has_gsmtc_track:
+                        act_raw = {
+                            "app_id": "YandexMusic.exe",
+                            "title": y_tr_c,
+                            "artist": y_art_c,
+                            "album": "",
+                            "status": "Playing",
+                            "position": 0.0,
+                            "duration": 0.0,
+                            "thumbnail_b64": "",
+                        }
+                        has_gsmtc_track = True
+                        act_playing = True
+                    elif act_raw and "yandex" in act_app_low and y_tr_c:
+                        g_yt_low = (act_raw.get("title") or "").strip().lower()
+                        ym_full_low = yt.lower()
+                        if not g_yt_low or (g_yt_low not in ym_full_low and y_tr_c.lower() not in g_yt_low):
+                            act_raw = dict(act_raw)
+                            act_raw["title"] = y_tr_c
+                            act_raw["artist"] = y_art_c
+                            act_raw["album"] = ""
+                            act_raw["status"] = "Playing"
+                            act_raw["position"] = 0.0
+                            act_raw["duration"] = 0.0
+                            act_raw["thumbnail_b64"] = ""
                     if not any(x.source_id == "yandex_music" for x in sessions):
                         sessions.append(
                             MediaSessionInfo(
                                 app_id="YandexMusic.exe",
-                                title=y_tr.strip(),
-                                artist=y_art.strip(),
+                                title=y_tr_c,
+                                artist=y_art_c,
                                 status="Playing",
                                 accent_color="#FFCC00",
                                 source_id="yandex_music",

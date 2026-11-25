@@ -58,33 +58,64 @@ function Await-Action($op) {
 $script:gsmtcMgr = Await-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
 $script:lastArtKey = ""
 $script:lastArtB64 = ""
+$script:emptyArtKey = ""
+$script:emptyArtUntilMs = [int64]0
+
+function Await-WinRTFast($op, $resultType, $timeoutMs) {
+    $m = $asTaskGeneric.MakeGenericMethod($resultType)
+    $t = $m.Invoke($null, @($op))
+    if ($t.Wait([int]$timeoutMs)) { return $t.Result }
+    return $null
+}
 
 function Read-ThumbnailB64($thumbRef, $artKey) {
     if ($null -eq $thumbRef) { return "" }
     if ($artKey -eq $script:lastArtKey -and $script:lastArtB64 -ne "") {
         return $script:lastArtB64
     }
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ($artKey -eq $script:emptyArtKey -and $nowMs -lt $script:emptyArtUntilMs) {
+        return ""
+    }
     try {
-        $stream = Await-WinRT ($thumbRef.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
-        if ($null -eq $stream) { return "" }
+        $stream = Await-WinRTFast ($thumbRef.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType]) 240
+        if ($null -eq $stream) {
+            $script:emptyArtKey = $artKey
+            $script:emptyArtUntilMs = $nowMs + 8000
+            return ""
+        }
         $size = [uint32]$stream.Size
         if ($size -le 0 -or $size -gt 6291456) {
             $stream.Dispose()
+            $script:emptyArtKey = $artKey
+            $script:emptyArtUntilMs = $nowMs + 8000
             return ""
         }
         $netStream = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($stream)
         $ms = New-Object System.IO.MemoryStream
-        $netStream.CopyTo($ms)
+        $copyTask = $netStream.CopyToAsync($ms)
+        if (-not $copyTask.Wait(260)) {
+            try { $stream.Dispose() } catch {}
+            $script:emptyArtKey = $artKey
+            $script:emptyArtUntilMs = $nowMs + 8000
+            return ""
+        }
         $bytes = $ms.ToArray()
         $ms.Dispose()
         $netStream.Dispose()
         $stream.Dispose()
-        if ($bytes.Length -le 0) { return "" }
+        if ($bytes.Length -le 0) {
+            $script:emptyArtKey = $artKey
+            $script:emptyArtUntilMs = $nowMs + 8000
+            return ""
+        }
         $b64 = [Convert]::ToBase64String($bytes)
         $script:lastArtKey = $artKey
         $script:lastArtB64 = $b64
         return $b64
     } catch {
+        $script:emptyArtKey = $artKey
+        $script:emptyArtUntilMs = $nowMs + 8000
         return ""
     }
 }
@@ -93,8 +124,8 @@ $script:lastMgrRefreshMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 
 function Get-MediaState($preferredAppId, $skipThumb) {
     $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    if ($null -eq $script:gsmtcMgr -or ($nowMs - $script:lastMgrRefreshMs) -gt 2500) {
-        $freshMgr = Await-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+    if ($null -eq $script:gsmtcMgr -or ($nowMs - $script:lastMgrRefreshMs) -gt 1200) {
+        $freshMgr = Await-WinRTFast ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]) 350
         if ($null -ne $freshMgr) {
             $script:gsmtcMgr = $freshMgr
             $script:lastMgrRefreshMs = $nowMs
@@ -115,7 +146,7 @@ function Get-MediaState($preferredAppId, $skipThumb) {
             $status = [string]$pb.PlaybackStatus
             if ($status -eq 'Closed') { continue }
             $tl = $s.GetTimelineProperties()
-            $props = Await-WinRT ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+            $props = Await-WinRTFast ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties]) 380
             $title = if ($props) { [string]$props.Title } else { "" }
             $artist = if ($props) { [string]$props.Artist } else { "" }
             $album = if ($props) { [string]$props.AlbumTitle } else { "" }
@@ -127,6 +158,9 @@ function Get-MediaState($preferredAppId, $skipThumb) {
             }
             if ($dur -gt 0 -and $pos -gt $dur) { $pos = $dur }
             $updTicks = if ($tl) { [int64]$tl.LastUpdatedTime.UtcTicks } else { [int64]0 }
+            $lowApp = $appId.ToLower()
+            $isMusicApp = ($lowApp.Contains("spotify") -or $lowApp.Contains("yandex") -or $lowApp.Contains("aimp") -or $lowApp.Contains("apple") -or $lowApp.Contains("itunes") -or $lowApp.Contains("foobar") -or $lowApp.Contains("winamp") -or $lowApp.Contains("vk"))
+            $isCur = ($curId -ne "" -and $appId -eq $curId)
             $item = @{
                 app_id = $appId
                 title = $title
@@ -138,12 +172,18 @@ function Get-MediaState($preferredAppId, $skipThumb) {
                 thumbnail_b64 = ""
             }
             $list += $item
-            $parsed += @{ item = $item; thumb = if ($props) { $props.Thumbnail } else { $null }; upd = $updTicks }
+            $parsed += @{
+                item = $item
+                thumb = if ($props) { $props.Thumbnail } else { $null }
+                upd = $updTicks
+                cur = if ($isCur) { 1 } else { 0 }
+                mus = if ($isMusicApp) { 1 } else { 0 }
+            }
         } catch {}
     }
 
-    # Always order newest-updated sessions first so swiped / newly started tracks win over stale sessions
-    $parsed = @($parsed | Sort-Object { $_.upd } -Descending)
+    # Order Playing sessions: Windows CurrentSession & dedicated music players first, then newest timeline update
+    $parsed = @($parsed | Sort-Object @{Expression={$_.cur};Descending=$true}, @{Expression={$_.mus};Descending=$true}, @{Expression={$_.upd};Descending=$true})
 
     $chosen = $null
     if ($preferredAppId) {
@@ -166,8 +206,8 @@ function Get-MediaState($preferredAppId, $skipThumb) {
     if ($null -ne $chosen) {
         $it = $chosen.item
         $artKey = "$($it.app_id)|$($it.title)|$($it.artist)|$($it.album)"
-        if ($skipThumb -and $artKey -ne $script:lastArtKey) {
-            $it.thumbnail_b64 = ""
+        if ($skipThumb) {
+            $it.thumbnail_b64 = if ($artKey -eq $script:lastArtKey) { $script:lastArtB64 } else { "" }
         } else {
             $it.thumbnail_b64 = Read-ThumbnailB64 $chosen.thumb $artKey
         }
@@ -382,9 +422,10 @@ while ($true) {
 class WinRTWorker:
     """Thread-safe persistent PowerShell WinRT worker."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, low_priority: bool = True) -> None:
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
+        self._low_priority = bool(low_priority)
 
     def _ensure_ps_script(self) -> Path:
         digest = hashlib.sha256(_PS_WORKER_SCRIPT.encode("utf-8")).hexdigest()[:12]
@@ -398,7 +439,7 @@ class WinRTWorker:
             return
         ps_path = self._ensure_ps_script()
         self._proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_path)],
+            ["powershell", "-NoProfile", "-MTA", "-ExecutionPolicy", "Bypass", "-File", str(ps_path)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -420,7 +461,7 @@ class WinRTWorker:
                 try:
                     self._ensure_started()
                     assert self._proc is not None
-                    if self._proc.pid != getattr(self, "_nice_applied_pid", 0):
+                    if self._low_priority and self._proc.pid != getattr(self, "_nice_applied_pid", 0):
                         from .win32_api import set_process_below_normal
 
                         set_process_below_normal(self._proc.pid)

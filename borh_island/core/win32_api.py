@@ -243,12 +243,22 @@ def set_overlay_window_flags(
     )
 
 
-def enum_visible_process_windows(process_names: set[str] | None = None) -> list[tuple[int, str, str]]:
-    """Return list of (hwnd, exe_name_lower, title) for visible top-level windows using thread-safe HWND walking."""
+def enum_visible_process_windows(
+    process_names: set[str] | None = None,
+    *,
+    include_hidden_players: bool = False,
+) -> list[tuple[int, str, str]]:
+    """Return list of (hwnd, exe_name_lower, title) for top-level windows using thread-safe HWND walking."""
     if sys.platform != "win32":
         return []
     wanted = {p.lower() for p in process_names} if process_names else None
+    tray_player_exes = {"spotify.exe", "yandexmusic.exe", "яндекс музыка.exe", "aimp.exe", "winamp.exe"}
+    ignore_titles = {
+        "default ime", "msctfime ui", "gdi+ window", "chrome legacy window",
+        "DDE Server Window".lower(), "CicMarshalWnd".lower(),
+    }
     results: list[tuple[int, str, str]] = []
+    hidden_fallbacks: list[tuple[int, str, str]] = []
     GW_HWNDNEXT = 2
     seen: set[int] = set()
     try:
@@ -260,22 +270,30 @@ def enum_visible_process_windows(process_names: set[str] | None = None) -> list[
             if ih in seen:
                 break
             seen.add(ih)
-            if user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
-                length = int(user32.GetWindowTextLengthW(hwnd) or 0)
-                if 0 < length <= 1024:
-                    pid = wt.DWORD(0)
-                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                    if pid.value:
-                        exe, _ = _get_process_name_and_elevation(pid.value)
-                        if exe and (wanted is None or exe in wanted):
-                            buf = ctypes.create_unicode_buffer(length + 2)
-                            user32.GetWindowTextW(hwnd, buf, length + 2)
-                            title = buf.value.strip()
-                            if title:
-                                results.append((ih, exe, title))
+            if user32.IsWindow(hwnd):
+                vis = bool(user32.IsWindowVisible(hwnd))
+                if vis or include_hidden_players:
+                    length = int(user32.GetWindowTextLengthW(hwnd) or 0)
+                    if 0 < length <= 1024:
+                        pid = wt.DWORD(0)
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value:
+                            exe, _ = _get_process_name_and_elevation(pid.value)
+                            if exe and (wanted is None or exe in wanted):
+                                if vis or exe in tray_player_exes:
+                                    buf = ctypes.create_unicode_buffer(length + 2)
+                                    user32.GetWindowTextW(hwnd, buf, length + 2)
+                                    title = buf.value.strip()
+                                    if title and title.lower() not in ignore_titles:
+                                        if vis:
+                                            results.append((ih, exe, title))
+                                        else:
+                                            hidden_fallbacks.append((ih, exe, title))
             hwnd = user32.GetWindow(hwnd, GW_HWNDNEXT)
     except Exception:
         pass
+    if hidden_fallbacks:
+        results.extend(hidden_fallbacks)
     return results
 
 
